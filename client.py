@@ -68,7 +68,7 @@ class Client:
             #     if i not in choosed_labels:
             #         others.append(i)
             # candidate[random.choice(others)] = 1
-
+            
             import random
             for other_label in range(self.config.num_classes):
                 if other_label != label and random.random() < self.config.noise_level:
