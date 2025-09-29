@@ -19,8 +19,8 @@ class PLLDataset(Dataset):
     
     def __getitem__(self, idx):
         data, target = self.base_dataset[idx]
-        # canditates = self.candidate_labels[idx].detach().clone()
-        canditates = torch.tensor(self.candidate_labels[idx])
+        canditates = self.candidate_labels[idx].detach().clone()
+        # canditates = torch.tensor(self.candidate_labels[idx])
         return data, target, canditates, idx
 
 def iid_partition(dataset, num_clients):
