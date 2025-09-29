@@ -1,0 +1,38 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter 笔记本（如果不需要跟踪）
+*.ipynb
+.ipynb_checkpoints/
+
+# 数据文件和目录
+data/
+*.npy  # NumPy数据文件（如果是临时生成的）
+
+# 日志和运行时文件
+wandb/ 
+
+
+# 系统和编辑器文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 虚拟环境（如果存在）
+venv/
+env/
+*.env
+*.venv
+
+# 可能的构建/缓存文件
+.cache/
+build/
+dist/
+
+temp/
+
