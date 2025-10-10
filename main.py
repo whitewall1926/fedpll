@@ -19,7 +19,7 @@ if __name__ == "__main__":
 
     path = './config.yaml'
     with open(path, 'r', encoding='utf-8') as f:
-        config = yaml.load(f)
+        config = yaml.safe_load(f)
 
     # config = {
     #     "seed":42,

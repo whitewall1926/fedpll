@@ -259,8 +259,10 @@ class Client:
             g_global_vec = None
         if self.config.optimizer.lower() == "adam":
             self.optimizer = torch.optim.Adam(self.local_model.parameters(), lr=self.config.lr)
+            print(f'client {self.client_id} using adam ')
         else:
             self.optimizer = torch.optim.SGD(self.local_model.parameters(), lr=self.config.lr, momentum=0.5)
+            print(f'client {self.client_id} using sgd ')
 
 
         self.local_model.train()
@@ -288,8 +290,8 @@ class Client:
 
                 self.optimizer.zero_grad()
                 output = self.local_model(data)
-                lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
-
+                # lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
+                lc_loss = self.pll_loss_vectorized_soft_preds(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
                 mix_loss = 0.0
                 if self.config.mix == True:
                     mix_loss =  self.pll_mix_up_loss(data=data, idxs=idxs, global_model_state_dict=global_model_state_dict)
@@ -399,6 +401,53 @@ class Client:
             #   f"Test Loss: {test_loss:.6f} | "
             f"Test Acc: {test_acc:.4f}\n")
         return test_acc
+    def pll_loss_vectorized_soft_preds(self, output, idxs, candidates,  miu=0.99):
+        q = self.q
+        batch_size = output.size(0)
+        
+        # cand_mask = candidates.to(device=self.device).bool()
+        # neg_inf = -1e-9
+        # logits_masked = output.clone()
+        # logits_masked = logits_masked.masked_fill(~cand_mask, neg_inf)
+        # pred_idx = logits_masked.argmax(dim=1)  # [batch_size]
+        device = output.device
+        B, C = output.shape
+
+        # ensure cand mask is boolean tensor on same device
+        if not isinstance(candidates, torch.Tensor):
+            # if it's list-of-lists, build mask (rare)
+            cand_mask = torch.zeros((B, C), dtype=torch.bool, device=device)
+            for i, cand in enumerate(candidates):
+                if len(cand) == 0:
+                    cand_mask[i, :] = True
+                else:
+                    cand_mask[i, list(cand)] = True
+        else:
+            cand_mask = candidates.to(device=device).bool()
+
+        # 1) 把非 candidate 的 logits 设为一个很小的负数，再 argmax（保证只在候选中选）
+        neg_inf = -1e9
+        logits_masked = output.clone()
+        logits_masked = logits_masked.masked_fill(~cand_mask, neg_inf)
+
+        # 若某行所有 candidates 都被 mask（不应该），回退为全候选以避免全 -inf
+        # （上面 masked_fill 不会变成全 -inf 因为 cand_mask 行至少应有一个 True；但多保守处理）
+        all_neg = (~cand_mask).all(dim=1)
+        if all_neg.any():
+            logits_masked[all_neg] = output[all_neg]  # 回退：不做 masked_fill
+
+        pred_idx = logits_masked.argmax(dim=1)  # 现在一定只会在候选中选
+
+        p = torch.zeros_like(output)     # [batch_size, num_classes]
+        p[torch.arange(batch_size), pred_idx] = 1.0
+        
+        p_soft = torch.softmax(logits_masked.detach(), dim=1)
+        q[idxs] = q[idxs] * miu + (1 - miu) * p_soft
+
+
+        log_probs = torch.log_softmax(output, dim=1)
+        loss = -(q[idxs] * log_probs).sum(dim=1).mean()
+        return loss
     def pll_loss_vectorized(self, output, idxs, candidates,  miu=0.99):
         q = self.q
         batch_size = output.size(0)
@@ -445,7 +494,6 @@ class Client:
         log_probs = torch.log_softmax(output, dim=1)
         loss = -(q[idxs] * log_probs).sum(dim=1).mean()
         return loss
-    
     def pll_loss_vectorized_unchanged(self, output, idxs, miu=0.99):
         q = self.q
         batch_size = output.size(0)
