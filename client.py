@@ -290,8 +290,8 @@ class Client:
 
                 self.optimizer.zero_grad()
                 output = self.local_model(data)
-                # lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
-                lc_loss = self.pll_loss_vectorized_soft_preds(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
+                lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
+                # lc_loss = self.pll_loss_vectorized_soft_preds(output=output, idxs=idxs, candidates=candidates, miu=0.99) 
                 mix_loss = 0.0
                 if self.config.mix == True:
                     mix_loss =  self.pll_mix_up_loss(data=data, idxs=idxs, global_model_state_dict=global_model_state_dict)
