@@ -108,7 +108,6 @@ class Server:
         if self.config.partition.lower() == "iid":
            client_train_dataset = iid_partition(dataset=self.train_dataset, num_clients=self.config.num_clients)
         else:
-            
             client_train_dataset,_, phi_matrix,  = non_iid_partition(dataset=self.train_dataset,
                                                     num_classes=self.config.num_classes, 
                                                      num_clients=self.config.num_clients,
@@ -224,9 +223,15 @@ class Server:
                 "sevrer_test/acc": test_acc,
                 "server/covered_classes": len(self.global_prototypes)
             }, step=r)
-            
             print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
-            
+
+            if r == 0 or (r + 1) % 5 == 0:
+                for client in self.clients:
+                    test_acc = client.test(test_loader=test_loader, 
+                                epoch = r,
+                                )
+                    print(f'*****client: {client.client_id} test acc {test_acc}')
+                
             # 每100轮画一次热力图 (原有逻辑)
             if (r + 1) % 100 == 0:
                 client_acc_matrix = [client.get_acc_matrix(test_loader=test_loader) for client in self.clients]

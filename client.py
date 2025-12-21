@@ -34,7 +34,8 @@ class Client:
                  local_model, 
                  train_dataset, 
                  client_id,
-                 config):
+                 config,
+                 external_candidates=None):
         self.client_id = client_id
         self.config = config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -118,20 +119,20 @@ class Client:
             #         candidate[i] = 1
             # print("true label =", label, "candidate =", candidate)
 
-            # cnt = int(self.config.noise_level * (self.config.num_classes))
-            # label_sim = sim[label].copy()
-            # label_sim_idx = np.argsort(label_sim)[::-1].copy()
-            # choosed_labels = label_sim_idx[:cnt]
-            # for idx in choosed_labels:
-            #     if random.random() < label_sim[idx]:
-            #         candidate[idx] = 1
+            cnt = int(self.config.noise_level * (self.config.num_classes))
+            label_sim = sim[label].copy()
+            label_sim_idx = np.argsort(label_sim)[::-1].copy()
+            choosed_labels = label_sim_idx[:cnt]
+            for idx in choosed_labels:
+                if random.random() < label_sim[idx]:
+                    candidate[idx] = 1
 
             # ... (其他候选标签生成逻辑) ...
 
             # 根据噪声等级随机生成
-            for other_label in range(self.config.num_classes):
-                if other_label != label and random.random() < self.config.noise_level:
-                    candidate[other_label] = 1
+            # for other_label in range(self.config.num_classes):
+            #     if other_label != label and random.random() < self.config.noise_level:
+            #         candidate[other_label] = 1
 
             for j in range(len(candidate)):
                 counts[label][j] += candidate[j].item()
@@ -484,7 +485,7 @@ class Client:
                 output = self.local_model(data)
                 
                 # --- Loss 1: 基础 PLL Loss (使用 Hard 模式) ---
-                lc_loss = self.pll_loss_vectorized_hard(output=output, idxs=idxs, candidates=candidates, roud=roud, miu=0.99)
+                lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99)
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征

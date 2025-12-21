@@ -5,7 +5,7 @@ optimizer: adam
 lr: 0.001
 model_name: resnet18
 dataset: SVHN
-noise_level: 0.3
+noise_level: 1
 rounds: 200
 num_classes: 10
 num_clients: 10
