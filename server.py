@@ -39,6 +39,9 @@ class Server:
         self.global_gradients = None
         self.global_grad_vector = None
 
+        # [FedODP 新增] 全局原型库 {class_id: tensor}
+        self.global_prototypes = {}
+    
     def aggregate_flattened_gradients(self, clients, num_batches_per_client=1):
         """
         要求每个 client 提供一个展平后的梯度向量（CPU tensor），函数返回按样本数加权的全局梯度向量（1D torch.Tensor on server.device）
@@ -149,11 +152,12 @@ class Server:
                                                       title=f'Client{idx}: Target x Candidate (blue heatmap', normalize='none', figsize=(12, 6))
             wandb.log({f"client{idx}/labels_candidates__client_distribution": wandb.Image(fig)}, commit=False)
 
-
     def start(self):
-        self.pre()
+        self.pre() # 初始化 Clients 和 Global Model
+        
+        # 初始化权重
         if len(self.weights) == 0:
-            for client in (self.clients):
+            for client in self.clients:
                 self.weights.append(len(client.train_dataset) * 1.0)
 
         test_loader = DataLoader(
@@ -162,55 +166,81 @@ class Server:
             shuffle=False,
         )
 
+        # 记录已覆盖的类别数 (用于观察系统何时学会了所有类)
+        covered_classes_history = []
+
         for r in range(self.config.rounds):
-            print(f'current step: {wandb.run.step}, current roud: {r}')
+            print(f'current step: {wandb.run.step}, current round: {r}')
 
             state_dicts = list()
+            
+            # [FedODP] 用于收集本轮各 Client 贡献的原型
+            local_prototypes_collect = [] 
+
             k = int(len(self.clients) * self.config.ratio)
             selected_clients = random.sample(self.clients, k)
-            print(f"number: {k}, slected clients: {[self.clients.index(client) for client in selected_clients]}")
+            print(f"number: {k}, selected clients: {[self.clients.index(client) for client in selected_clients]}")
 
             selected_weights = [self.weights[self.clients.index(client)] for client in selected_clients]
 
+            # 计算全局梯度 (GA Loss 用，保持不变)
             global_grad_vector = self.aggregate_flattened_gradients(selected_clients, num_batches_per_client=1)
             
-            
-
+            # --- Client 训练循环 ---
             for client in selected_clients:
-                state_dict = client.train(global_model_state_dict=self.global_model.state_dict(), 
-                                          roud = r, 
-                                          global_grad_vector=global_grad_vector)
+                # [FedODP 关键修改] 
+                # 传入 self.global_prototypes 给 Client 进行“按需消歧”
+                state_dict = client.train(
+                    global_model_state_dict=self.global_model.state_dict(), 
+                    roud=r, 
+                    global_prototypes=self.global_prototypes, # <--- 传情报
+                    global_grad_vector=global_grad_vector
+                )
                 state_dicts.append(state_dict)
-            if r == 0 or (r + 1) % 10 == 0:
-                for client in self.clients:
-                    client.test(test_loader=test_loader, 
-                                epoch = r,
-                                )
-                    
+                
+                # [FedODP 关键修改]
+                # 训练完后，让 Client 贡献它的“情报”（本地原型）
+                # 建议：前几轮 (Warm-up) 模型太差，不要收集，以免污染库
+                if r >= 5: 
+                    # threshold=0.8 表示只确信度>0.8的才上传
+                    local_protos = client.get_local_prototypes(threshold=0.8)
+                    if len(local_protos) > 0:
+                        local_prototypes_collect.append(local_protos)
+
+            # --- Server 聚合 ---
+            
+            # 1. 聚合模型参数 (原有逻辑)
             new_state_dict = self.fed_avg_simple(state_dicts=state_dicts, weights=selected_weights) 
             self.global_model.load_state_dict(new_state_dict)
+            
+            # 2. [FedODP] 聚合原型 (更新全局情报库)
+            if len(local_prototypes_collect) > 0:
+                self.aggregate_prototypes(local_prototypes_collect)
+                print(f"Server updated global prototypes. Covered classes: {len(self.global_prototypes)}/10")
+            
+            # 3. 测试与评估
             test_acc = self.eval(test_loader=test_loader)
+            wandb.log({
+                "sevrer_test/acc": test_acc,
+                "server/covered_classes": len(self.global_prototypes)
+            }, step=r)
             
-            wandb.log({"sevrer_test/acc":test_acc}, step=r)
-            # wandb.log({"test/loss":test_loss})
-            print(f"Server ----> Round: {r:3d} | "
-                #   f"Test Loss: {test_loss:.6f} | "
-                f"Test Acc: {test_acc:.4f}\n")
+            print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
             
-            if (r + 1)%100 == 0:
+            # 每100轮画一次热力图 (原有逻辑)
+            if (r + 1) % 100 == 0:
                 client_acc_matrix = [client.get_acc_matrix(test_loader=test_loader) for client in self.clients]
                 server_acc_matrix = self.get_acc_matrix(test_loader=test_loader)
 
                 for idx, acc_matrix in enumerate(client_acc_matrix):
-                    fig = plot_acc_counts_heatmap_blue_test(counts=acc_matrix,  
-                                                            normalize='none', figsize=(20, 10))
+                    fig = plot_acc_counts_heatmap_blue_test(counts=acc_matrix, normalize='none', figsize=(20, 10))
                     wandb.log({f"client{idx}/True_Pred": wandb.Image(fig)}, commit=False)
 
-
-                fig = plot_acc_counts_heatmap_blue_test(counts=server_acc_matrix,  
-                                                            normalize='none', figsize=(20, 10))
+                fig = plot_acc_counts_heatmap_blue_test(counts=server_acc_matrix, normalize='none', figsize=(20, 10))
                 wandb.log({f"Server/True_Pred": wandb.Image(fig)}, commit=False)
+
         wandb.log({}, commit=True)
+    
 
     def get_acc_matrix(self, test_loader):
         self.global_model.eval()
@@ -243,6 +273,48 @@ class Server:
         # 日志记录和打印
         
         return acc_matrix  # 可选择返回混淆矩阵
+    
+    # --- [FedODP] 聚合原型 ---
+    def aggregate_prototypes(self, clients_prototypes_list):
+        """
+        聚合来自 Client 的本地原型，更新全局原型库。
+        采用 Momentum Update (动量更新) 以保持特征库的稳定性。
+        """
+        # 1. 临时累加容器
+        new_protos_sum = {}
+        new_protos_count = {}
+        
+        # 2. 遍历所有 Client 上传的原型字典
+        for client_protos in clients_prototypes_list:
+            for k, p in client_protos.items():
+                p = p.to(self.device)
+                
+                if k not in new_protos_sum:
+                    new_protos_sum[k] = p
+                    new_protos_count[k] = 1
+                else:
+                    new_protos_sum[k] += p
+                    new_protos_count[k] += 1
+        
+        # 3. 计算本轮平均值并更新全局
+        alpha = 0.5 # 动量系数 (0.5 表示新旧各占一半，可调)
+        
+        for k in new_protos_sum:
+            # 计算本轮上传者的平均特征
+            current_round_avg = new_protos_sum[k] / new_protos_count[k]
+            current_round_avg = torch.nn.functional.normalize(current_round_avg, p=2, dim=0)
+            
+            if k not in self.global_prototypes:
+                # 如果是新发现的类别，直接存入
+                self.global_prototypes[k] = current_round_avg
+            else:
+                # 如果已有记录，进行动量更新
+                old_proto = self.global_prototypes[k]
+                new_proto = alpha * old_proto + (1 - alpha) * current_round_avg
+                self.global_prototypes[k] = torch.nn.functional.normalize(new_proto, p=2, dim=0)
+
+        return self.global_prototypes
+    
     
     def fed_avg_simple(self, state_dicts: List[Dict[str, torch.Tensor]],
                    weights: Optional[List[float]] = None,

@@ -44,3 +44,4 @@ packages.microsoft.gpg
 *.png
 csv_logs/
 wandb/
+wandb/
