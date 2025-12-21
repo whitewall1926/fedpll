@@ -37,3 +37,10 @@ dist/
 temp/
 
 packages.microsoft.gpg
+
+
+*.csv
+*.png*.csv
+*.png
+csv_logs/
+wandb/

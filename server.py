@@ -29,7 +29,7 @@ import random
 
 class Server:
     def __init__(self, config, train_dataset, test_dataset):
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.global_model = None
         self.clients = []
@@ -191,8 +191,6 @@ class Server:
             self.global_model.load_state_dict(new_state_dict)
             test_acc = self.eval(test_loader=test_loader)
             
-            
-
             wandb.log({"sevrer_test/acc":test_acc}, step=r)
             # wandb.log({"test/loss":test_loss})
             print(f"Server ----> Round: {r:3d} | "

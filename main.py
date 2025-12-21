@@ -105,7 +105,10 @@ if __name__ == "__main__":
         #     transform=transform,
         #     download=True
         # )
-        
+        wandb.config.update({
+            "exp_id": run.id,
+            "exp_name": run.name
+        })
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.4377, 0.4438, 0.4728],  # SVHN �ٷ���ֵ

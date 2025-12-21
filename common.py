@@ -23,6 +23,30 @@ class PLLDataset(Dataset):
         # canditates = torch.tensor(self.candidate_labels[idx])
         return data, target, canditates, idx
 
+
+svhn_mean = [0.4377, 0.4438, 0.4728]
+svhn_std = [0.1980, 0.2010, 0.1970]
+def denormalize_image(tensor):
+    """
+    使用 SVHN 特定的均值和标准差反归一化图像张量。
+    """
+    img = tensor.cpu().clone()
+    
+    # 转换为 torch.tensor 并调整形状以便广播
+    # [3] -> [3, 1, 1]
+    mean = torch.tensor(svhn_mean).view(3, 1, 1)
+    std = torch.tensor(svhn_std).view(3, 1, 1)
+    
+    # 反归一化: (img * std) + mean
+    img = img * std + mean
+    
+    # 裁剪到 [0, 1] 范围
+    img = torch.clamp(img, 0, 1)
+    
+    # [C, H, W] -> [H, W, C] 以便绘图
+    return img.permute(1, 2, 0).numpy()
+
+
 def iid_partition(dataset, num_clients):
     perm = torch.randperm(len(dataset))
     new_perms = np.array_split(perm.numpy(), num_clients)
