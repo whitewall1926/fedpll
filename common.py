@@ -333,6 +333,152 @@ def plot_acc_counts_heatmap_blue_test(counts: np.ndarray,
 
     return fig
 
+
+import numpy as np
+import torch
+from torch.utils.data import Subset
+
+def split_testset_by_distribution(global_test_dataset, phi_matrix):
+    """
+    根据训练数据的分布矩阵 phi_matrix，为每个客户端构建专属的测试集。
+    策略：只要客户端拥有某类训练数据，就分给它该类的所有测试数据。
+    
+    Args:
+        global_test_dataset: PyTorch Dataset (e.g., CIFAR10 test set)
+        phi_matrix: [num_clients, num_classes] 矩阵，记录了每个客户端的类别分布情况
+                    (可以是数量，也可以是概率，只要 >0 代表存在即可)
+    
+    Returns:
+        test_datasets: list of Subsets, len = num_clients
+    """
+    
+    # 1. 获取全局测试集的标签
+    # 处理不同数据集格式 (CIFAR/MNIST 通常是 .targets, 自定义可能是 .labels)
+    if hasattr(global_test_dataset, 'targets'):
+        test_labels = np.array(global_test_dataset.targets)
+    elif hasattr(global_test_dataset, 'labels'):
+        test_labels = np.array(global_test_dataset.labels)
+    else:
+        # 如果是 TensorDataset，通常第二个元素是 label
+        # 这是一个比较暴力的 fallback，视具体 dataset 实现调整
+        test_labels = np.array([y for _, y in global_test_dataset])
+
+    num_clients, num_classes = phi_matrix.shape
+    client_test_datasets = []
+
+    # 2. 建立“倒排索引”：记录每个类别对应的所有测试样本索引
+    # class_id -> [idx1, idx2, idx5...]
+    class_indices_map = {c: np.where(test_labels == c)[0] for c in range(num_classes)}
+
+    print(f"Start partitioning test set for {num_clients} clients...")
+
+    for client_idx in range(num_clients):
+        # 3. 找出当前客户端拥有的类别
+        # 假设 phi_matrix[k][c] > 0 表示该客户端拥有类别 c
+        client_dist_vec = phi_matrix[client_idx]
+        
+        # 获取该客户端拥有的所有类别索引
+        # 使用 > 0 判断，兼容 count 矩阵或 probability 矩阵
+        target_classes = np.where(np.array(client_dist_vec) > 0)[0]
+        
+        # 4. 收集这些类别对应的所有测试样本索引
+        client_test_indices = []
+        for c in target_classes:
+            if c in class_indices_map:
+                client_test_indices.extend(class_indices_map[c])
+        
+        # 排序索引（可选，为了美观和确定性）
+        client_test_indices = np.sort(client_test_indices)
+        
+        # 5. 创建 Subset
+        if len(client_test_indices) > 0:
+            client_subset = Subset(global_test_dataset, client_test_indices)
+            client_test_datasets.append(client_subset)
+        else:
+            print(f"[Warning] Client {client_idx} has no valid classes in phi_matrix!")
+            client_test_datasets.append(None) # 或者给一个空的 Subset
+
+    print(f"Successfully created {len(client_test_datasets)} local test datasets.")
+    return client_test_datasets
+
+# --- 使用示例 ---
+# 假设 test_dataset 是你加载好的 CIFAR10 测试集
+# client_test_sets = split_testset_by_distribution(test_dataset, phi_matrix)
+
+# 验证一下 Client 0
+# print(f"Client 0 Test Size: {len(client_test_sets[0])}")
+
+
+import torch
+import numpy as np
+from torch.utils.data import Subset
+from collections import Counter
+
+def print_dataset_distribution(dataset, title="Dataset Distribution"):
+    """
+    统计并打印 PyTorch Dataset 中各个类别的样本数量。
+    支持 Subset, TensorDataset 以及 torchvision 数据集。
+    
+    Args:
+        dataset: torch.utils.data.Dataset (或 Subset)
+        title: 打印时的标题
+    Returns:
+        dict: {class_id: count}
+    """
+    if dataset is None:
+        print(f"[{title}] Dataset is None (Empty).")
+        return {}
+
+    targets = []
+    
+    # --- 策略 A: 快速路径 (直接读取属性，不遍历) ---
+    # 场景 1: 它是 Subset (最常见的情况)
+    if isinstance(dataset, Subset):
+        # 尝试访问底层 dataset 的 targets 或 labels
+        if hasattr(dataset.dataset, 'targets'):
+            # dataset.indices 是 subset 选择的索引列表
+            # dataset.dataset.targets 是原始的大标签列表
+            # 我们只需要挑出 subset 对应的那些
+            all_targets = np.array(dataset.dataset.targets)
+            targets = all_targets[dataset.indices]
+        elif hasattr(dataset.dataset, 'labels'):
+            all_labels = np.array(dataset.dataset.labels)
+            targets = all_labels[dataset.indices]
+            
+    # 场景 2: 它是普通 Dataset (如 CIFAR10 原身)
+    elif hasattr(dataset, 'targets'):
+        targets = dataset.targets
+    elif hasattr(dataset, 'labels'):
+        targets = dataset.labels
+        
+    # --- 策略 B: 慢速路径 (通用遍历) ---
+    # 如果上面没获取到 targets (比如是 TensorDataset)，则只能老实遍历
+    if len(targets) == 0 and len(dataset) > 0:
+        # 为了不拖慢速度，如果数据量巨大，可以只采样前1000个，这里默认全遍历
+        print(f"[{title}] No .targets attribute found, iterating... (might be slow)")
+        for _, label in dataset:
+            if isinstance(label, torch.Tensor):
+                targets.append(label.item())
+            else:
+                targets.append(label)
+
+    # --- 统计与打印 ---
+    # 使用 Counter 统计
+    counter = Counter(targets)
+    sorted_classes = sorted(counter.keys())
+    
+    print(f"\n--- {title} (Total: {len(dataset)}) ---")
+    print(f"{'Class ID':<10} | {'Count':<10} | {'Proportion':<10}")
+    print("-" * 36)
+    
+    for cls in sorted_classes:
+        count = counter[cls]
+        ratio = count / len(dataset)
+        print(f"{cls:<10} | {count:<10} | {ratio:.2%}")
+    print("-" * 36 + "\n")
+    
+    return dict(counter)
+
 def compute_client_class_counts_from_subsets(client_datasets, num_classes):
     """
     client_datasets: list of torch.utils.data.Subset（可能包含空的 Subset）
@@ -365,6 +511,60 @@ def compute_client_class_counts_from_subsets(client_datasets, num_classes):
                     label = label.item()
                 counts[i, int(label)] += 1
     return counts
+from tqdm import tqdm
+def generate_candidates(model, data_loader, device, noise_rate, num_classes=10):
+    model.eval()
+    model.to(device)
+    
+    all_candidates = []
+    
+    print(f"\n[Phase 2] Generating Partial Labels using Instance-Dependent Logic...")
+    print(f"Algorithm: Suppress GT -> Normalize Max -> Scale by Rate({noise_rate}) -> Binomial")
+
+    with torch.no_grad():
+        for inputs, targets in tqdm(data_loader, desc="Generating"):
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            # 1. Oracle 预测
+            outputs = model(inputs)
+            # outputs shape: [B, 10]
+            
+            # 2. 构造真实标签掩码
+            gt_mask = torch.zeros(inputs.size(0), num_classes, device=device)
+            gt_mask.scatter_(1, targets.unsqueeze(1), 1)
+            
+            # 3. 获取 Softmax 概率
+            probs = torch.softmax(outputs, dim=1)
+            
+            # 4. 【关键】抑制真值 (只看错误项)
+            probs[gt_mask.bool()] = 0
+            
+            # 5. 【关键】Max 归一化
+            # 让最像真的那个错误项概率变为 1.0
+            max_val, _ = probs.max(dim=1, keepdim=True)
+            max_val[max_val == 0] = 1.0 # 防止除零
+            probs = probs / max_val
+            
+            # 6. 【关键】密度缩放
+            # 控制整体噪音数量
+            mean_val = probs.mean(dim=1, keepdim=True)
+            mean_val[mean_val == 0] = 1.0
+            probs = probs / mean_val * noise_rate
+            
+            # 7. 截断与采样
+            probs[probs > 1.0] = 1.0
+            m = torch.distributions.binomial.Binomial(total_count=1, probs=probs)
+            # print(probs)
+            noise_mask = m.sample()
+            
+            # 8. 合并 (真值 + 噪音)
+            final_candidates = gt_mask + noise_mask
+            final_candidates[final_candidates > 1.0] = 1.0
+            
+            all_candidates.append(final_candidates.cpu())
+            
+    return torch.cat(all_candidates, dim=0)
+
 
 def plot_counts_heatmap(counts, normalize='none', figsize=(10,6), annotate=False, cmap='viridis'):
     """

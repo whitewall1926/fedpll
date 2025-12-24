@@ -127,5 +127,27 @@ if __name__ == "__main__":
             transform=transform,
             download=True
         )
+
+        # transform = transforms.Compose([
+        #     transforms.ToTensor(),
+        #     transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],  # CIFAR-10 Mean
+        #                         std=[0.2023, 0.1994, 0.2010])    # CIFAR-10 Std
+        # ])
+
+        # # 加载 CIFAR-10 训练集
+        # train_dataset = datasets.CIFAR10(
+        #     root='./data',
+        #     train=True,
+        #     transform=transform,
+        #     download=True
+        # )
+
+        # # 加载 CIFAR-10 测试集
+        # test_dataset = datasets.CIFAR10(
+        #     root='./data',
+        #     train=False,
+        #     transform=transform,
+        #     download=True
+        # )
         server = Server(config=run.config, train_dataset=train_dataset, test_dataset=test_dataset)
         server.start()

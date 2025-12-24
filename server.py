@@ -12,6 +12,7 @@ import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Dataset, Subset
 
+import common
 from common import (
     iid_partition, 
     non_iid_partition, 
@@ -19,7 +20,8 @@ from common import (
     compute_client_class_counts_from_subsets, 
     plot_candidates_counts_heatmap_blue, 
     plot_acc_counts_heatmap_blue,
-    plot_acc_counts_heatmap_blue_test
+    plot_acc_counts_heatmap_blue_test,
+    split_testset_by_distribution
 )
 import numpy as np
 
@@ -29,7 +31,7 @@ import random
 
 class Server:
     def __init__(self, config, train_dataset, test_dataset):
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.global_model = None
         self.clients = []
@@ -38,10 +40,13 @@ class Server:
         self.test_dataset = test_dataset
         self.global_gradients = None
         self.global_grad_vector = None
-
+        
         # [FedODP 新增] 全局原型库 {class_id: tensor}
         self.global_prototypes = {}
     
+        # 配置本地测试集
+        self.client_test_datasets = None
+
     def aggregate_flattened_gradients(self, clients, num_batches_per_client=1):
         """
         要求每个 client 提供一个展平后的梯度向量（CPU tensor），函数返回按样本数加权的全局梯度向量（1D torch.Tensor on server.device）
@@ -115,7 +120,8 @@ class Server:
                                                      alpha_dir=self.config.alpha_dir)
             
             counts = compute_client_class_counts_from_subsets(client_datasets=client_train_dataset, num_classes=self.config.num_classes)
-            
+            self.client_test_datasets = split_testset_by_distribution(global_test_dataset=self.test_dataset, phi_matrix=phi_matrix)
+
             fig = plot_counts_heatmap_blue(counts=counts, normalize='none', figsize=(12, 6))
             
             wandb.log({"clients_class_distribution": wandb.Image(fig)}, commit=False)
@@ -165,9 +171,20 @@ class Server:
             shuffle=False,
         )
 
+        clients_test_loaders = []
+        for client in self.clients:
+            clients_test_loaders.append(DataLoader(dataset=self.client_test_datasets[client.client_id],
+                                                   batch_size=128,
+                                                   shuffle=False))
+            common.print_dataset_distribution(
+                    self.client_test_datasets[client.client_id], 
+                    title=f"Client {client.client_id} Test Set"
+                )            
         # 记录已覆盖的类别数 (用于观察系统何时学会了所有类)
         covered_classes_history = []
 
+        
+        
         for r in range(self.config.rounds):
             print(f'current step: {wandb.run.step}, current round: {r}')
 
@@ -226,11 +243,12 @@ class Server:
             print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
 
             if r == 0 or (r + 1) % 5 == 0:
+                
                 for client in self.clients:
-                    test_acc = client.test(test_loader=test_loader, 
+                    client_test_acc = client.test(test_loader=clients_test_loaders[client.client_id], 
                                 epoch = r,
                                 )
-                    print(f'*****client: {client.client_id} test acc {test_acc}')
+                    print(f'*****client: {client.client_id} test acc {client_test_acc}')
                 
             # 每100轮画一次热力图 (原有逻辑)
             if (r + 1) % 100 == 0:
@@ -302,8 +320,9 @@ class Server:
                     new_protos_count[k] += 1
         
         # 3. 计算本轮平均值并更新全局
-        alpha = 0.5 # 动量系数 (0.5 表示新旧各占一半，可调)
-        
+        # alpha = 0.5 # 动量系数 (0.5 表示新旧各占一半，可调)
+        alpha = 0.99 # 动量系数 (0.99 相信历史)
+
         for k in new_protos_sum:
             # 计算本轮上传者的平均特征
             current_round_avg = new_protos_sum[k] / new_protos_count[k]
