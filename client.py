@@ -629,6 +629,67 @@ class Client:
         wandb.log(logs_to_wandb, step=roud)
 
         return self.local_model.state_dict()
+    def _get_all_targets(self):
+        """
+        Robustly extract targets/labels from Subset or Dataset.
+        Handles both CIFAR (targets) and SVHN (labels).
+        """
+        # 1. 解包 Subset
+        if isinstance(self.train_dataset, torch.utils.data.Subset):
+            dataset_ref = self.train_dataset.dataset
+            indices = self.train_dataset.indices
+        else:
+            dataset_ref = self.train_dataset
+            indices = None
+
+        # 2. 动态探测属性名 (The Safety Net)
+        if hasattr(dataset_ref, "targets"):
+            full_targets = dataset_ref.targets
+        elif hasattr(dataset_ref, "labels"):
+            full_targets = dataset_ref.labels
+        else:
+            # 如果是完全自定义的数据集，可能两个都没有
+            raise AttributeError(f"Dataset {type(dataset_ref)} has neither .targets nor .labels. Check your dataset implementation.")
+
+        # 3. 统一转为 Tensor
+        # SVHN 的 labels 是 numpy array，CIFAR 是 list，这里都能处理
+        full_targets = torch.as_tensor(full_targets)
+
+        # 4. 切片 (如果需要)
+        if indices is not None:
+            targets = full_targets[indices]
+        else:
+            targets = full_targets
+
+        # 5. 移动到设备
+        return targets.to(self.device)
+    
+    
+    def balanced_dis_acc(self):
+
+        true_labels = self._get_all_targets()
+        q = torch.as_tensor(self.q).to(self.device)
+        dis_labels = torch.argmax(q, dim=1)
+
+        
+        num_classes = q.size(1)
+        class_accs = []
+        
+        for c in range(num_classes):
+            # [Task 1]: 创建一个掩码 mask，找出 true_labels 中等于 c 的索引
+            # mask = ... (Boolean Tensor)
+            mask = (true_labels == c)
+            if mask.sum() == 0:
+                continue
+            # [Task 2]: 如果该类别在 batch 中存在 (mask.sum() > 0)
+            # 计算该类别的准确率并 append 到 class_accs
+            # 提示：使用 dis_labels[mask] 和 true_labels[mask]
+            acc = (dis_labels[mask] == true_labels[mask]).float().mean()
+            class_accs.append(acc.item())
+        # [Task 3]: 计算 class_accs 的平均值并返回 Python float
+        # 注意处理 class_accs 为空的情况
+
+        return class_accs, np.mean(class_accs)
     
 
     def get_acc_matrix(self, test_loader):

@@ -28,6 +28,9 @@ import numpy as np
 import copy
 
 import random
+from common import setup_logger
+from datetime import datetime
+import os 
 
 class Server:
     def __init__(self, config, train_dataset, test_dataset):
@@ -241,6 +244,23 @@ class Server:
                 "server/covered_classes": len(self.global_prototypes)
             }, step=r)
             print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
+
+
+
+
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            save_dir = os.path.join('./logs', current_date)
+            logger = setup_logger(save_path=save_dir, log_file_name=f"{wandb.config.exp_id}.log")            # 统计消歧义率
+            all_client_accs = []
+            for client in self.clients:
+                class_accs, mean_acc = client.balanced_dis_acc()
+                all_client_accs.append(mean_acc)
+
+                # 3. 详细日志 (Verbose Logging)
+                # 记录每个 Client 的表现，方便排查掉队的节点 (Stragglers)
+                logger.info(f"Client {client.client_id}: Balanced Acc = {mean_acc:.4f}")
+            global_avg_acc = np.mean(all_client_accs)
+            logger.info(f"Round {r} Global Avg Disambiguation Acc: {global_avg_acc:.4f}")
 
             if r == 0 or (r + 1) % 5 == 0:
                 

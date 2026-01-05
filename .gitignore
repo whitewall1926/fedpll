@@ -45,3 +45,7 @@ packages.microsoft.gpg
 csv_logs/
 wandb/
 wandb/
+svhn_visual_similarity.npy
+
+
+logs

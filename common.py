@@ -791,6 +791,34 @@ def plot_candidates_counts_heatmap_blue(counts,
     #     plt.show()
 
     return fig
+
+import logging
+import os
+
+def setup_logger(save_path, log_file_name):
+    logger = logging.getLogger() 
+    if len(logger.handlers) > 0:
+        return logger
+    
+    logger.setLevel(logging.INFO) 
+    
+    formatter = logging.Formatter("[%(asctime)s] [%(filename)s:%(lineno)d] [%(levelname)s] %(message)s")
+
+    # [FIX 1]: 修正路径拼接
+    full_log_file = os.path.join(save_path, log_file_name)
+    
+    # [FIX 2]: 确保父目录存在，否则 FileHandler 会报错
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    # [FIX 3]: 显式指定 utf-8
+    fh = logging.FileHandler(filename=full_log_file, mode='a', encoding='utf-8')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    return logger
+
+
 def plot_counts_heatmap_blue(counts,
                              normalize='none',   # 'none'|'row'|'col'|'all'
                              title='Client x Class (blue heatmap)',
