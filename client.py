@@ -507,7 +507,9 @@ class Client:
         # 1. 加载全局模型参数
         # if roud <= 30:
         # if roud < 30:
-        self.local_model.load_state_dict(global_model_state_dict)
+        if roud == 0:
+            print('加载全局模型参数')
+            self.local_model.load_state_dict(global_model_state_dict)
 
 
 
@@ -568,9 +570,9 @@ class Client:
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
-                proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
+                # proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
                 # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
-                # proto_loss = 0.0
+                proto_loss = 0.0
                 
                 # --- Loss 3: Mixup (可选) ---
                 mix_loss = 0.0
