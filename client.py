@@ -13,6 +13,7 @@ from common import denormalize_image, svhn_mean, svhn_std
 import model
 import common
 from tqdm import tqdm
+from typing import Tuple, List, Optional
 
 sim = np.array([
     [1.00,0.10,0.05,0.05,0.02,0.15,0.70,0.03,0.20,0.70],
@@ -720,33 +721,57 @@ class Client:
         # 5. 移动到设备
         return targets.to(self.device)
     
-    
-    def balanced_dis_acc(self):
 
+
+    def calculate_class_wise_accuracy(self) -> Tuple[List[float], float]:
+        """Calculates the balanced (macro-average) accuracy for disambiguation tasks.
+
+        This method compares the model's predictions (derived from 'q' vectors) against 
+        the ground truth labels. It computes accuracy independently for each class 
+        to handle class imbalance.
+
+        Returns:
+            A tuple containing:
+                - class_accuracies (List[float]): Accuracy for each existing class.
+                - balanced_acc (float): The mean of class_accuracies. 
+                Returns 0.0 if no valid classes are found.
+        """
+        # 1. Descriptive Variable Names
         true_labels = self._get_all_targets()
-        q = torch.as_tensor(self.q).to(self.device)
-        dis_labels = torch.argmax(q, dim=1)
+        # Assuming self.q is the probability distribution or logits
+        predicted_probs = torch.as_tensor(self.q, device=self.device)
+        
+        # 2. Logic Optimization: Use Tensor Operations
+        predicted_labels = torch.argmax(predicted_probs, dim=1)
+        num_classes = predicted_probs.size(1)
 
-        
-        num_classes = q.size(1)
-        class_accs = []
-        
-        for c in range(num_classes):
-            # [Task 1]: 创建一个掩码 mask，找出 true_labels 中等于 c 的索引
-            # mask = ... (Boolean Tensor)
-            mask = (true_labels == c)
-            if mask.sum() == 0:
+        class_accuracies: List[float] = []
+
+        # 3. Defensive Programming: Explicit device handling if needed
+        # Ensure true_labels is on the same device for comparison
+        if true_labels.device != predicted_labels.device:
+            true_labels = true_labels.to(predicted_labels.device)
+
+        for class_idx in range(num_classes):
+            # Create boolean mask
+            class_mask = (true_labels == class_idx)
+            
+            # Skip classes that don't appear in this batch/dataset
+            if class_mask.sum() == 0:
                 continue
-            # [Task 2]: 如果该类别在 batch 中存在 (mask.sum() > 0)
-            # 计算该类别的准确率并 append 到 class_accs
-            # 提示：使用 dis_labels[mask] 和 true_labels[mask]
-            acc = (dis_labels[mask] == true_labels[mask]).float().mean()
-            class_accs.append(acc.item())
-        # [Task 3]: 计算 class_accs 的平均值并返回 Python float
-        # 注意处理 class_accs 为空的情况
 
-        return class_accs, np.mean(class_accs)
-    
+            # Calculate accuracy for this specific class
+            # (Correct Predictions for Class C) / (Total Samples of Class C)
+            correct_preds = (predicted_labels[class_mask] == true_labels[class_mask])
+            accuracy = correct_preds.float().mean().item()
+            
+            class_accuracies.append(accuracy)
+
+        # 4. Robust Return: Handle Edge Case (Empty List)
+        if not class_accuracies:
+            return [], 0.0
+
+        return class_accuracies, float(np.mean(class_accuracies))    
 
     def get_acc_matrix(self, test_loader):
         self.local_model.eval()

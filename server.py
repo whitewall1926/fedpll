@@ -34,10 +34,12 @@ import os
 
 class Server:
     def __init__(self, config, train_dataset, test_dataset):
+        self.clients: List[Client] = []
         self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.global_model = None
-        self.clients = []
+        # self.clients = []
+        self.clients: List[Client] = []
         self.weights =  []
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
@@ -253,7 +255,7 @@ class Server:
             logger = setup_logger(save_path=save_dir, log_file_name=f"{wandb.config.exp_id}.log")            # 统计消歧义率
             all_client_accs = []
             for client in self.clients:
-                class_accs, mean_acc = client.balanced_dis_acc()
+                class_accs, mean_acc = client.calculate_class_wise_accuracy()
                 all_client_accs.append(mean_acc)
 
                 # 3. 详细日志 (Verbose Logging)
