@@ -390,6 +390,59 @@ class Client:
             count += 1
             
         return loss_proto / (count + 1e-8)
+    
+    def prototype_guidance_loss_mse(self, features, output, candidates, global_prototypes, temperature=1):
+        if global_prototypes is None or len(global_prototypes) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        # 1. 计算归一化熵 (0~1)，判断是否是困难样本
+        # 复用你已有的 get_uncertainty_entropy_masked
+        norm_entropy = self.get_uncertainty_entropy_masked(output, candidates)
+        
+        # 2. 阈值筛选：熵大于 0.4 视为“困惑/困难样本”
+        mask_hard = norm_entropy > 0.4
+        
+        if mask_hard.sum() == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        hard_indices = torch.where(mask_hard)[0]
+        loss_proto = 0.0
+        count = 0
+
+        # 准备全局原型数据
+        proto_keys = list(global_prototypes.keys())
+        # [K, D]
+        proto_tensor = torch.stack([global_prototypes[k] for k in proto_keys]).to(self.device)
+        proto_labels = torch.tensor(proto_keys).to(self.device)
+
+        for idx in hard_indices:
+            feat = features[idx] # [D]
+            curr_cands = candidates[idx].bool() # [C]
+            
+            # 计算特征与所有全局原型的余弦相似度
+            sim = F.cosine_similarity(feat.unsqueeze(0), proto_tensor) # [K]
+            
+            # 关键逻辑：只听取“候选集内”的原型建议
+            # 比如候选是{猫, 狗}，我就只看 Server 里的“猫原型”和“狗原型”谁更像我
+            valid_mask = curr_cands[proto_labels] 
+            
+            if valid_mask.sum() == 0: continue
+
+            valid_sims = sim[valid_mask]
+            
+            # Server 作为 Teacher：根据相似度生成软标签
+            teacher_probs = F.softmax(valid_sims / temperature, dim=0).detach()
+            
+            # Client 作为 Student：在对应类别上的预测
+            student_logits = output[idx][proto_labels[valid_mask]]
+            student_probs = F.softmax(student_logits / temperature, dim=0)
+            
+            # MSE 拉近距离
+            loss_proto += F.mse_loss(student_probs, teacher_probs, reduction='sum')
+            count += 1
+            
+        return loss_proto / (count + 1e-8)
+    
 
     # --- [FedODP] 3. 计算本地原型 (贡献) ---
     def get_local_prototypes(self, threshold=0.8):
@@ -516,6 +569,7 @@ class Client:
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
                 proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
+                # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
                 # proto_loss = 0.0
                 
                 # --- Loss 3: Mixup (可选) ---
