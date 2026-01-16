@@ -43,7 +43,7 @@ class Client:
         self.config = config
         self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.rounds = 0
-
+        self.norm_entropy: float = 0.0
         # [FedODP 新增] 特征缓存
         self.features_buffer = {} 
         self.hook_handle = None
@@ -340,7 +340,7 @@ class Client:
             self.hook_handle = None
 
     # --- [FedODP] 2. 原型指导 Loss (求助) ---
-    def prototype_guidance_loss(self, features, output, candidates, global_prototypes, temperature=0.1):
+    def prototype_guidance_loss(self, features, output, candidates, global_prototypes, temperature=0.1, alpha = 0.99):
         if global_prototypes is None or len(global_prototypes) == 0:
             return torch.tensor(0.0, device=self.device)
 
@@ -348,8 +348,14 @@ class Client:
         # 复用你已有的 get_uncertainty_entropy_masked
         norm_entropy = self.get_uncertainty_entropy_masked(output, candidates)
         
+        mask_hard = norm_entropy  > self.norm_entropy
+        
+        # 更新本地阈值
+        current_batch_mean = norm_entropy.mean().detach()
+        self.norm_entropy = alpha * self.norm_entropy + (1 - alpha) * current_batch_mean
+        print(f'熵值：{self.norm_entropy}')
         # 2. 阈值筛选：熵大于 0.4 视为“困惑/困难样本”
-        mask_hard = norm_entropy > 0.4
+        
         
         if mask_hard.sum() == 0:
             return torch.tensor(0.0, device=self.device)
@@ -506,11 +512,7 @@ class Client:
         print(f"roud {roud} training... (Client {self.client_id})")
         
         # 1. 加载全局模型参数
-        # if roud <= 30:
-        # if roud < 30:
-        if roud == 0:
-            print('加载全局模型参数')
-            self.local_model.load_state_dict(global_model_state_dict)
+        self.local_model.load_state_dict(global_model_state_dict)
 
 
 
@@ -571,9 +573,9 @@ class Client:
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
-                # proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
+                proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
                 # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
-                proto_loss = 0.0
+                # proto_loss = 0.0
                 
                 # --- Loss 3: Mixup (可选) ---
                 mix_loss = 0.0
@@ -722,7 +724,7 @@ class Client:
         return targets.to(self.device)
     
 
-
+    
     def calculate_class_wise_accuracy(self) -> Tuple[List[float], float]:
         """Calculates the balanced (macro-average) accuracy for disambiguation tasks.
 
