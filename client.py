@@ -143,24 +143,23 @@ class Client:
 
             # ... (其他候选标签生成逻辑) ...
 
-            # 根据噪声等级随机生成
-            # for other_label in range(self.config.num_classes):
-            #     if other_label != label and random.random() < self.config.noise_level:
-            #         candidate[other_label] = 1
+            # 实例无关场景根据噪声等级随机生成
+            for other_label in range(self.config.num_classes):
+                if other_label != label and random.random() < self.config.noise_level:
+                    candidate[other_label] = 1
 
-            # for j in range(len(candidate)):
-            #     counts[label][j] += candidate[j].item()
-            
-            # candidate_labels.append(candidate)
+            for j in range(len(candidate)):
+                counts[label][j] += candidate[j].item()
+            candidate_labels.append(candidate)
         
             # 统计实例依赖场景下候选标签集和分布
-            for j in range(len(id_all_candidates[i])):
-                counts[label][j] += id_all_candidates[i][j].item()
+            # for j in range(len(id_all_candidates[i])):
+            #     counts[label][j] += id_all_candidates[i][j].item()
 
 
         print(f'client id:{client_id}\n', counts)
-        # self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=candidate_labels, rho=self.config.noise_level)
-        self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=id_all_candidates, rho=self.config.noise_level)
+        self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=candidate_labels, rho=self.config.noise_level)
+        # self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=id_all_candidates, rho=self.config.noise_level)
 
         
         
@@ -568,14 +567,14 @@ class Client:
                 # Forward
                 output = self.local_model(data)
                 
-                # --- Loss 1: 基础 PLL Loss (使用 Hard 模式) ---
+                # --- Loss 1: 基础 PLL Loss ---
                 lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99)
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
-                proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
+                # proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
                 # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
-                # proto_loss = 0.0
+                proto_loss = 0.0
                 
                 # --- Loss 3: Mixup (可选) ---
                 mix_loss = 0.0

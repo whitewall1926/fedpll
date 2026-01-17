@@ -1,8 +1,8 @@
 seed: 42
-local_epochs: 1
+local_epochs: 5
 batch_size: 128
-optimizer: adam
-lr: 0.001
+optimizer: sgd
+lr: 0.03
 model_name: resnet18
 dataset: SVHN
 noise_level: 0.3
