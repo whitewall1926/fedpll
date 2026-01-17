@@ -17,3 +17,4 @@ mixup_alpha: 0.2
 lc: true
 mix: false
 ga: false
+uniform: true

@@ -52,6 +52,11 @@ class Server:
         # 配置本地测试集
         self.client_test_datasets = None
 
+        # 统计消歧义率
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        save_dir = os.path.join('./logs', current_date)
+        self.logger = setup_logger(save_path=save_dir, log_file_name=f"{wandb.config.exp_id}.log")            
+
     def aggregate_flattened_gradients(self, clients, num_batches_per_client=1):
         """
         要求每个 client 提供一个展平后的梯度向量（CPU tensor），函数返回按样本数加权的全局梯度向量（1D torch.Tensor on server.device）
@@ -190,6 +195,8 @@ class Server:
 
         
         
+        
+        
         for r in range(self.config.rounds):
             print(f'current step: {wandb.run.step}, current round: {r}')
 
@@ -250,9 +257,8 @@ class Server:
 
 
 
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            save_dir = os.path.join('./logs', current_date)
-            logger = setup_logger(save_path=save_dir, log_file_name=f"{wandb.config.exp_id}.log")            # 统计消歧义率
+            logger = self.logger
+
             all_client_accs = []
             for client in self.clients:
                 class_accs, mean_acc = client.calculate_class_wise_accuracy()

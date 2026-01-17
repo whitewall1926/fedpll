@@ -14,6 +14,8 @@ import model
 import common
 from tqdm import tqdm
 from typing import Tuple, List, Optional
+import logging
+
 
 sim = np.array([
     [1.00,0.10,0.05,0.05,0.02,0.15,0.70,0.03,0.20,0.70],
@@ -50,14 +52,16 @@ class Client:
 
         self.train_dataset = train_dataset
 
-        gen_loader = DataLoader(self.train_dataset, batch_size=128, shuffle=False)
-        resnet18 = model.get_resnet18(pretrained=True)
-        id_all_candidates = common.generate_candidates(model=resnet18, 
-                                                    data_loader=gen_loader,
-                                                    device='cuda',
-                                                    noise_rate=0.3,
-                                                    num_classes=10)
-        print(id_all_candidates[:3])
+        if self.config.uniform == False:
+            
+            gen_loader = DataLoader(self.train_dataset, batch_size=128, shuffle=False)
+            resnet18 = model.get_resnet18(pretrained=True)
+            id_all_candidates = common.generate_candidates(model=resnet18, 
+                                                        data_loader=gen_loader,
+                                                        device='cuda',
+                                                        noise_rate=0.3,
+                                                        num_classes=10)
+            print(id_all_candidates[:3])
         
         candidate_labels = []
 
@@ -143,23 +147,55 @@ class Client:
 
             # ... (其他候选标签生成逻辑) ...
 
-            # 实例无关场景根据噪声等级随机生成
-            for other_label in range(self.config.num_classes):
-                if other_label != label and random.random() < self.config.noise_level:
-                    candidate[other_label] = 1
+            if self.config.uniform == True:
+                    is_flipped = False # 1. 标记是否发生了翻转
+                    
+                    # 尝试随机翻转
+                    for other_label in range(self.config.num_classes):
+                        if other_label != label:
+                            if random.random() < self.config.noise_level:
+                                candidate[other_label] = 1
+                                is_flipped = True
+                    
+                    # 2. 强制翻转逻辑 (The Constraint Enforcer)
+                    # 如果一圈下来一个噪声都没选中，必须强制选一个
+                    if not is_flipped:
+                        # 创建一个不包含真值的候选列表
+                        candidates_idx = list(range(self.config.num_classes))
+                        candidates_idx.remove(label)
+                        
+                        # 随机挑一个作为噪声
+                        forced_noise = random.choice(candidates_idx)
+                        candidate[forced_noise] = 1
+                        
+                        # (可选) 打印调试信息，证明逻辑生效了
+                        # print(f"Sample {i} forced flip on class {forced_noise}")
+
 
             for j in range(len(candidate)):
-                counts[label][j] += candidate[j].item()
+                if self.config.uniform == True:
+                    counts[label][j] += candidate[j].item() # 实例无关场景根据噪声等级随机生成
+                else:
+                    counts[label][j] += id_all_candidates[i][j].item()  # 统计实例依赖场景下候选标签集和分布
             candidate_labels.append(candidate)
         
-            # 统计实例依赖场景下候选标签集和分布
-            # for j in range(len(id_all_candidates[i])):
-            #     counts[label][j] += id_all_candidates[i][j].item()
+           
+            
+
+                
 
 
-        print(f'client id:{client_id}\n', counts)
-        self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=candidate_labels, rho=self.config.noise_level)
-        # self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=id_all_candidates, rho=self.config.noise_level)
+        print(f'client id:{client_id} 候选标签集和分布\n', counts)
+        if self.config.uniform == True:
+            print(f'生成实例无关场景候选标签集和')
+            self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=candidate_labels, rho=self.config.noise_level)
+            print(f'噪声等级为: {self.check_noise()}')
+            
+        else:
+            print(f'生成实例依赖场景候选标签集和')
+            self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=id_all_candidates, rho=self.config.noise_level)
+            print(f'噪声等级为: {self.check_noise()}')
+            
 
         
         
@@ -197,6 +233,77 @@ class Client:
         self.epochs = self.config.local_epochs
         self.global_model = None
 
+    def check_noise(self) -> float:
+        """
+        [Correct Implementation] 
+        Vectorized verification of noise statistics.
+        Dynamically compares against config.noise_level.
+        """
+        
+        # 1. 直接获取全量 Tensor (Shape: [N, C])
+        if hasattr(self.train_plldataset, 'candidate_labels'):
+            candidates = self.train_plldataset.candidate_labels
+        else:
+            raise AttributeError("Fatal: PLLDataset must expose 'candidate_labels' tensor.")
+        
+        # 2. 健壮的类型转换 (List -> Tensor, GPU -> CPU)
+        if isinstance(candidates, list):
+            candidates = torch.stack(candidates)
+        elif not torch.is_tensor(candidates):
+            candidates = torch.tensor(candidates)
+        
+        candidates = candidates.float().cpu()
+
+        # 3. 核心统计 (Vectorized)
+        # sum(dim=1) -> 每个样本的候选集大小
+        sample_counts = candidates.sum(dim=1)
+        
+        # --- [关键修改] 动态计算理论值 ---
+        # 获取配置参数
+        target_rho = self.config.noise_level
+        num_classes = self.config.num_classes  # 或 candidates.shape[1]
+        
+        # 计算理论平均大小 (Theoretical Average Size)
+        # 公式: 1(True) + (C-1)*rho(Noise) + (1-rho)^(C-1)(Force Flip Correction)
+        # 最后一项是因为 "当没有选中任何噪声时，强制选一个" 带来的增量
+        prob_zero_noise = (1.0 - target_rho) ** (num_classes - 1)
+        theoretical_avg = 1.0 + (num_classes - 1) * target_rho + prob_zero_noise
+        # -------------------------------
+
+        # 指标 A: 实际平均大小
+        avg_size = sample_counts.mean().item()
+
+        # 指标 B: 反推的 Rho (用于直观参考)
+        estimated_rho = (avg_size - 1.0) / (num_classes - 1.0)
+
+        # 指标 C: 最小候选数 (硬约束)
+        min_size = sample_counts.min().item()
+
+        # 4. 打印诊断报告 (使用 f-string 动态显示目标值)
+        header = f"\n=== [Client {self.client_id} Noise Report (Target Rho={target_rho})] ==="
+        msg_lines = [
+            header,
+            f"Dataset Size: {len(sample_counts)}",
+            f" >> Avg Candidate Size : {avg_size:.4f} (Theoretical: {theoretical_avg:.4f})",
+            f" >> Estimated Rho      : {estimated_rho:.4f} (Target: {target_rho})",
+            f" >> Min Candidate Size : {min_size:.1f}  (MUST BE >= 2.0)"
+        ]
+
+        # 统一打印和日志记录
+        for line in msg_lines:
+            print(line)
+            logging.info(line.strip())
+
+        # 5. 熔断保护 (Circuit Breaker)
+        if min_size < 2.0:
+            error_idx = (sample_counts < 2.0).nonzero(as_tuple=True)[0][0].item()
+            err_msg = f"[FATAL] Sample {error_idx} has only {sample_counts[error_idx].item()} label (True label only)."
+            print(err_msg)
+            logging.error(err_msg)
+            raise ValueError("Constraint Violation: You forgot to implement 'Force 1 Flip' when no noise is selected.")
+            
+        return avg_size
+            
         
     def compute_flattened_local_grad(self, num_batches=1, use_global_model=False):
         """
@@ -509,7 +616,6 @@ class Client:
             self.update_config(new_config)
 
         print(f"roud {roud} training... (Client {self.client_id})")
-        
         # 1. 加载全局模型参数
         self.local_model.load_state_dict(global_model_state_dict)
 
