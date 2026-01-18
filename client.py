@@ -571,15 +571,17 @@ class Client:
                 data, target, candidates, idxs = batch
                 data = data.to(self.device)
                 
-                self.local_model(data) # Forward 触发 Hook
+                logits = self.local_model(data) # Forward 触发 Hook
                 features = self.features_buffer.get('feat') # [B, D]
-                
+                # norm_entropy = self.get_uncertainty_entropy_masked(*logits=logits, candidates=candidates)
+
                 # 使用平滑过的 q 向量来判断置信度
                 qs = self.q[idxs]
                 max_vals, max_ids = qs.max(dim=1)
                 
                 # 筛选高置信度样本
                 mask = max_vals > threshold
+
                 if mask.sum() == 0: continue
                 
                 confident_feats = features[mask]
@@ -1065,7 +1067,8 @@ class Client:
         E = total_epochs
         T = T_end + 0.5 * (T_start - T_end) * (1 + math.cos( (e / E) * math.pi ))
         return T
-    def get_uncertainty_entropy_masked(self, logits, candidates):
+    
+    def get_uncertainty_entropy_masked(self, logits: torch.Tensor, candidates) -> torch.Tensor:
         device = logits.device
         
         # 1. 先把非候选集的 logits 屏蔽掉 (Masking)

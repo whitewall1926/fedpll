@@ -14,6 +14,8 @@ from common import ExperimentConfig, setup_logger
 from datetime import datetime
 
 import json
+import argparse
+
 
 
 if __name__ == "__main__":
@@ -21,9 +23,14 @@ if __name__ == "__main__":
     os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
     os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
     os.environ['WANDB_API_KEY'] = "364095e05fdc1c26991c0347c509cfc8a4ef138c" 
+    
+    parser = argparse.ArgumentParser(description="联邦偏标记学习实验管理")
+    parser.add_argument('--config', type=str, default='config.yaml', help='配置文件')
+    args = parser.parse_args()
+    
 
     try:
-        config = ExperimentConfig.from_yaml("config.yaml")
+        config = ExperimentConfig.from_yaml(args.config)
     except Exception as e:
         print(f"❌ 配置加载失败: {e}")
         exit(1)
