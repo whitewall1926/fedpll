@@ -798,6 +798,7 @@ class Client:
         wandb.log(logs_to_wandb, step=roud)
 
         return self.local_model.state_dict()
+    
     def _get_all_targets(self):
         """
         Robustly extract targets/labels from Subset or Dataset.

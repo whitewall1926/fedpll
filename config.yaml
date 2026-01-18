@@ -2,7 +2,7 @@ seed: 42
 local_epochs: 10
 batch_size: 128
 optimizer: sgd
-lr: 0.003
+lr: 0.01
 momentum: 0.5
 model_name: resnet18
 dataset: SVHN
@@ -19,6 +19,6 @@ lc: true
 mix: false
 ga: false
 uniform: true
-proto: false
+proto: true
 
 device: cuda:1

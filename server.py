@@ -193,7 +193,8 @@ class Server:
         
         
         
-        
+        acc = []
+
         for r in range(self.config.rounds):
             print(f'current step: {wandb.run.step}, current round: {r}')
 
@@ -244,15 +245,14 @@ class Server:
                 print(f"Server updated global prototypes. Covered classes: {len(self.global_prototypes)}/10")
             
             # 3. 测试与评估
+            
             test_acc = self.eval(test_loader=test_loader)
             wandb.log({
                 "sevrer_test/acc": test_acc,
                 "server/covered_classes": len(self.global_prototypes)
             }, step=r)
             print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
-
-
-
+            acc.append(test_acc)
 
             logger = self.logger
 
@@ -286,6 +286,16 @@ class Server:
 
                 fig = plot_acc_counts_heatmap_blue_test(counts=server_acc_matrix, normalize='none', figsize=(20, 10))
                 wandb.log({f"Server/True_Pred": wandb.Image(fig)}, commit=False)
+
+        
+        last_10_acc = acc[-10:] 
+        # 2. 使用 numpy 计算均值和标准差
+        mean_acc = np.mean(last_10_acc)
+        std_acc = np.std(last_10_acc)
+        # 3. 格式化打印 (保留 2 位小数，带上 ± 标准差)
+        log_msg = f'Result: Last 10 Rounds Avg: {mean_acc:.2f}% ± {std_acc:.2f}%'
+        logger.info(log_msg)
+        print(log_msg)
 
         wandb.log({}, commit=True)
     
@@ -402,13 +412,13 @@ class Server:
 
         
 
-    def eval(self, test_loader):
+    def eval(self, test_loader)->float:
         
         
         self.global_model.eval()
         
-        test_acc = 0
-        test_loss = 0
+        test_acc:float = 0.0
+        test_loss:float = 0
         with torch.no_grad():
             for data, target in test_loader:
                 data, target = data.to(self.device), target.to(self.device)
