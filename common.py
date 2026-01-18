@@ -6,6 +6,91 @@ import matplotlib.pyplot as plt
 
 import wandb
 import numpy as np
+
+import yaml
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+
+import yaml
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+
+class ExperimentConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    # --- 基础训练参数 ---
+    seed: int
+    local_epochs: int
+    batch_size: int
+    optimizer: str  # 或者用 Literal['sgd', 'adam']
+    
+    # [关键] 这里定义了类型，Pydantic 会自动把 yaml 里的数字转成 float
+    lr: float 
+    momentum: float
+    
+    # [自动修补] 你的 YAML 里没写这个，但我给了默认值
+    # 这样读取配置时，它会自动补上 5e-4，不用改 YAML 也能跑
+    weight_decay: float = 5e-4 
+
+    # --- 模型与数据 ---
+    model_name: str
+    dataset: str
+    num_classes: int
+    
+    # --- 联邦学习设置 ---
+    rounds: int
+    num_clients: int
+    ratio: float       # 采样比例
+    partition: str     # non_iid
+    
+    # --- 噪声与异构参数 ---
+    noise_level: float
+    p: float           # 可能是噪声概率或划分参数
+    alpha_dir: float   # Dirichlet alpha
+    
+    # --- 算法开关 (Bool) ---
+    mixup_alpha: float
+    lc: bool           # Label Correction
+    mix: bool
+    ga: bool           # Gradient Alignment
+    uniform: bool
+    proto: bool        # Prototype
+
+    exp_id: str = ""   
+    exp_name: str = ""
+
+    # 显卡
+    device: str = ""
+
+    # --- [工业级] 校验逻辑 ---
+    @field_validator('lr')
+    def check_lr_positive(cls, v):
+        if v <= 0:
+            raise ValueError(f"Learning rate must be positive, got {v}")
+        return v
+
+    @classmethod
+    def from_yaml(cls, path: str):
+        """工厂方法：从 YAML 文件直接读取并实例化"""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                # 1. 读取原始字典
+                raw_data = yaml.safe_load(f)
+                
+            # 2. 实例化 (这里会自动进行类型检查和默认值填充)
+            return cls(**raw_data)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Config file not found at: {path}")
+        except Exception as e:
+            raise ValueError(f"Failed to load config: {e}")
+
+
+class GlobalConfig:
+    lr: float
+    momentum: float
+    local_epochs: int
+    noise_level: float
+
 class PLLDataset(Dataset):
     def __init__(self, base_dataset,candidate_labels, num_classes=10, rho=0.0):
         self.base_dataset = base_dataset
@@ -793,9 +878,10 @@ def plot_candidates_counts_heatmap_blue(counts,
     return fig
 
 import logging
+from logging import Logger
 import os
 
-def setup_logger(save_path, log_file_name):
+def setup_logger(save_path, log_file_name) -> Logger:
     logger = logging.getLogger() 
     if len(logger.handlers) > 0:
         return logger

@@ -28,15 +28,15 @@ import numpy as np
 import copy
 
 import random
-from common import setup_logger
+from common import setup_logger, ExperimentConfig 
+from logging import Logger
 from datetime import datetime
 import os 
-
 class Server:
-    def __init__(self, config, train_dataset, test_dataset):
+    def __init__(self, config: ExperimentConfig, train_dataset, test_dataset, logger: Logger):
         self.clients: List[Client] = []
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.config = config
+        self.device = self.config.device
         self.global_model = None
         # self.clients = []
         self.clients: List[Client] = []
@@ -45,17 +45,14 @@ class Server:
         self.test_dataset = test_dataset
         self.global_gradients = None
         self.global_grad_vector = None
-        
+        self.logger = logger
         # [FedODP 新增] 全局原型库 {class_id: tensor}
         self.global_prototypes = {}
     
         # 配置本地测试集
         self.client_test_datasets = None
 
-        # 统计消歧义率
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        save_dir = os.path.join('./logs', current_date)
-        self.logger = setup_logger(save_path=save_dir, log_file_name=f"{wandb.config.exp_id}.log")            
+                    
 
     def aggregate_flattened_gradients(self, clients, num_batches_per_client=1):
         """

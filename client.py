@@ -15,7 +15,8 @@ import common
 from tqdm import tqdm
 from typing import Tuple, List, Optional
 import logging
-
+from common import GlobalConfig, ExperimentConfig
+from datetime import datetime
 
 sim = np.array([
     [1.00,0.10,0.05,0.05,0.02,0.15,0.70,0.03,0.20,0.70],
@@ -39,11 +40,11 @@ class Client:
                  local_model, 
                  train_dataset, 
                  client_id,
-                 config,
+                 config:ExperimentConfig,
                  external_candidates=None):
         self.client_id = client_id
         self.config = config
-        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        self.device = self.config.device
         self.rounds = 0
         self.norm_entropy: float = 0.0
         # [FedODP 新增] 特征缓存
@@ -74,8 +75,8 @@ class Client:
         num_per_class_to_track = 3
 
         
-        exp_id = str(self.config.get("exp_id", "unknown_id"))
-        exp_name = str(self.config.get("exp_name", "unknown_run"))
+        exp_id = self.config.exp_id
+        exp_name = self.config.exp_name
 
         self.log_dir = os.path.join("csv_logs", f"{exp_id}_{exp_name}")
         os.makedirs(self.log_dir, exist_ok=True) # 创建这个文件夹
@@ -637,7 +638,7 @@ class Client:
             self.optimizer = torch.optim.Adam(self.local_model.parameters(), lr=self.config.lr)
             print(f'client {self.client_id} using adam ')
         else:
-            self.optimizer = torch.optim.SGD(self.local_model.parameters(), lr=self.config.lr, momentum=0.5)
+            self.optimizer = torch.optim.SGD(self.local_model.parameters(), lr=self.config.lr, momentum=self.config.momentum)
             print(f'client {self.client_id} using sgd ')
 
         # 4. 开启训练模式 & 注册特征提取 Hook
@@ -678,9 +679,11 @@ class Client:
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
-                # proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
-                # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
-                proto_loss = 0.0
+                if self.config.proto == True:
+                    proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
+                    # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
+                else:
+                    proto_loss = 0.0
                 
                 # --- Loss 3: Mixup (可选) ---
                 mix_loss = 0.0
@@ -747,7 +750,7 @@ class Client:
 
             train_loss = train_loss / total_samples
             train_acc = train_acc / total_samples
-            
+            print(f"--- [Client {self.client_id}] Training Epoch {epoch}/{self.epochs} Train Acc {train_acc} ---")
             # 这里的 Log 稍微改一下，显示 Proto Loss 是否生效
             # print(f"----> client: {self.client_id} | Roud: {roud:3d} | Epoch: {epoch:3d} | "
             #     f"Loss: {train_loss:.4f} | Acc: {train_acc:.4f}\n")

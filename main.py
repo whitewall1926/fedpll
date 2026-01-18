@@ -10,6 +10,11 @@ import os
 from common import seed_everything
 
 import yaml
+from common import ExperimentConfig, setup_logger
+from datetime import datetime
+
+import json
+
 
 if __name__ == "__main__":
 
@@ -17,137 +22,129 @@ if __name__ == "__main__":
     os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
     os.environ['WANDB_API_KEY'] = "364095e05fdc1c26991c0347c509cfc8a4ef138c" 
 
-    path = './config.yaml'
-    with open(path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-
-    # config = {
-    #     "seed":42,
-    #     "local_epochs": 5,
-    #     "batch_size": 128,
-    #     "optimizer":"sgd",
-    #     "lr": 0.1,
-    #     "model_name": "resnet18",
-    #     "dataset": "SVHN",
-    #     "noise_level": 0.3,
-    #     "rounds":250,
-    #     "num_classes":10,
-    #     "num_clients":10,
-    #     "ratio":1,
-    #     "partition":"non_iid",
-    #     "p": 0.7,
-    #     "alpha_dir": 0.5,
-    #     "mixup_alpha":0.2,
-    #     "lc":True,
-    #     "mix":False,
-    #     "ga":False
-    # }
+    try:
+        config = ExperimentConfig.from_yaml("config.yaml")
+    except Exception as e:
+        print(f"❌ 配置加载失败: {e}")
+        exit(1)
+    
     data_partition = ""
-    if config['partition'].lower() == "non_iid":
-        data_partition = f'noniid_class_p:{config["p"]}_alpha_dir:{config["alpha_dir"]}'
+    if config.partition.lower() == "non_iid":
+        data_partition = f'noniid_class_p:{config.p}_alpha_dir:{config.alpha_dir}'
     else:
         data_partition = f'iid'
 
     loss_kind = ""
-    if config['lc'] == True:
+    if config.lc == True:
         loss_kind += "lc"
-    if config['mix'] == True:
+    if config.mix == True:
         loss_kind += "_mix"
-    if config['ga'] == True:
+    if config.ga == True:
         loss_kind += "_ga"
     
          
-    with wandb.init(project='test-fl', 
-                 entity='whitewall_9-jinan-university', 
-                 config=config, 
-                 name = (f'fedpll_noise:{config["noise_level"]}_m:{config["model_name"].lower()}_' 
-                        f'd:{config["dataset"]}_{data_partition}_lr:{config["lr"]:.3f}_' 
-                        f'optim:{config["optimizer"]}_{loss_kind}_' 
-                        # f'sim'
-                        f'findsgd'
-                        ),
-                 group='fedpll',
-                 allow_val_change=True,
-                 ) as run:
+    with wandb.init(
+        project='test-fl', 
+        entity='whitewall_9-jinan-university', 
+        config=config.model_dump(), # 传字典给 wandb
+        name=(
+            f'fedpll_noise:{config.noise_level}_m:{config.model_name.lower()}_' 
+            f'd:{config.dataset}_{data_partition}_lr:{config.lr:.3f}_' 
+            f'optim:{config.optimizer}_{loss_kind}_findsgd'
+        ),
+        group='fedpll',
+        allow_val_change=True,
+    ) as run:
         
-        seed_everything(run.config.seed)
-
-        # mnist fashionmnist
-        # transform = transforms.Compose([
-        #     transforms.ToTensor(),
-        #     transforms.Normalize((0.1307, ), (0.3081,))
-        # ])
-
+        # 1. [Inject] 回填运行时 ID
+        config.exp_id = run.id
+        config.exp_name = run.name
         
-        # train_dataset = datasets.FashionMNIST(
-        #     root='./data',
-        #     train=True,
-        #     transform=transform,
-        #     download=True
-        #  )
-
-        # test_dataset = datasets.FashionMNIST(
-        #     root='./data',
-        #     train=False,
-        #     transform=transform,
-        #     download=True
-        # )
-        # train_dataset = datasets.MNIST(
-        #     root='./data',
-        #     train=True,
-        #     transform=transform,
-        #     download=True
-        # )
-
-        # test_dataset = datasets.MNIST(
-        #     root='./data',
-        #     train=False,
-        #     transform=transform,
-        #     download=True
-        # )
+        # 2. [Sync] 更新 WandB 云端配置
         wandb.config.update({
             "exp_id": run.id,
             "exp_name": run.name
-        })
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4377, 0.4438, 0.4728],  # SVHN �ٷ���ֵ
-                                std=[0.1980, 0.2010, 0.1970])    # SVHN �ٷ���׼��
-        ])
-        train_dataset = datasets.SVHN(
-            root='./data',
-            split='train',
-            transform=transform,
-            download=True
-        )
+        }, allow_val_change=True)
 
-        test_dataset = datasets.SVHN(
-            root='./data',
-            split='test',
-            transform=transform,
-            download=True
-        )
+        # 3. [Logger] 初始化日志
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        save_dir = os.path.join('./logs', current_date)
+        os.makedirs(save_dir, exist_ok=True)
+        logger = setup_logger(save_path=save_dir, log_file_name=f"{config.exp_id}.log")
+        
+        # 4. [Print Config] 打印漂亮的配置信息 (你的需求)
+        config_dict = config.model_dump()
+        config_str = json.dumps(config_dict, indent=4, ensure_ascii=False)
+        logger.info(f"\n{'='*20} Experiment Configuration {'='*20}\n{config_str}\n{'='*65}")
+        
+        # 5. [Seed] 固定种子
+        seed_everything(config.seed)
+        
+        # 6. [Dataset] 统一的数据集加载逻辑 (修复了之前的覆盖 Bug)
+        dataset_name = config.dataset.lower()
+        logger.info(f"Loading dataset: {dataset_name}...")
 
-        # transform = transforms.Compose([
-        #     transforms.ToTensor(),
-        #     transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],  # CIFAR-10 Mean
-        #                         std=[0.2023, 0.1994, 0.2010])    # CIFAR-10 Std
-        # ])
+        if dataset_name == 'svhn':
+            # SVHN 统计数据
+            mean = [0.4377, 0.4438, 0.4728]
+            std  = [0.1980, 0.2010, 0.1970]
+            
+            # 训练集：RandomCrop + Normalize (禁止水平翻转)
+            transform_train = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ])
+            # 测试集：Normalize
+            transform_test = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ])
 
-        # # 加载 CIFAR-10 训练集
-        # train_dataset = datasets.CIFAR10(
-        #     root='./data',
-        #     train=True,
-        #     transform=transform,
-        #     download=True
-        # )
+            train_dataset = datasets.SVHN(root='./data', split='train', transform=transform_train, download=True)
+            test_dataset = datasets.SVHN(root='./data', split='test', transform=transform_test, download=True)
 
-        # # 加载 CIFAR-10 测试集
-        # test_dataset = datasets.CIFAR10(
-        #     root='./data',
-        #     train=False,
-        #     transform=transform,
-        #     download=True
-        # )
-        server = Server(config=run.config, train_dataset=train_dataset, test_dataset=test_dataset)
+        elif dataset_name == 'cifar10':
+            # CIFAR-10 统计数据
+            mean = [0.4914, 0.4822, 0.4465]
+            std  = [0.2023, 0.1994, 0.2010]
+
+            # 训练集：RandomCrop + HorizontalFlip (CIFAR必须加翻转)
+            transform_train = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ])
+            transform_test = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ])
+
+            train_dataset = datasets.CIFAR10(root='./data', train=True, transform=transform_train, download=True)
+            test_dataset = datasets.CIFAR10(root='./data', train=False, transform=transform_test, download=True)
+
+        elif dataset_name == 'fashionmnist':
+            # FashionMNIST (单通道)
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,))
+            ])
+            train_dataset = datasets.FashionMNIST(root='./data', train=True, transform=transform, download=True)
+            test_dataset = datasets.FashionMNIST(root='./data', train=False, transform=transform, download=True)
+        
+        elif dataset_name == 'mnist':
+            # MNIST (单通道)
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,))
+            ])
+            train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
+            test_dataset = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
+
+        else:
+            raise ValueError(f"Unknown dataset: {config.dataset}")
+
+        # 7. [Start] 启动 Server
+        server = Server(config=config, train_dataset=train_dataset, test_dataset=test_dataset, logger=logger)
         server.start()
