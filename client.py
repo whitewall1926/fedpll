@@ -46,7 +46,7 @@ class Client:
         self.config = config
         self.device = self.config.device
         self.rounds = 0
-        self.norm_entropy: float = 0.0
+        self.norm_entropy: float = 1.0
         # [FedODP 新增] 特征缓存
         self.features_buffer = {} 
         self.hook_handle = None
@@ -449,6 +449,7 @@ class Client:
     # --- [FedODP] 2. 原型指导 Loss (求助) ---
     def prototype_guidance_loss(self, features, output, candidates, global_prototypes, temperature=0.1, alpha = 0.99):
         if global_prototypes is None or len(global_prototypes) == 0:
+            
             return torch.tensor(0.0, device=self.device)
 
         # 1. 计算归一化熵 (0~1)，判断是否是困难样本
@@ -619,6 +620,24 @@ class Client:
             self.update_config(new_config)
 
         print(f"roud {roud} training... (Client {self.client_id})")
+
+        if self.config.optimizer.lower() == "adam":
+            print(f'Client {self.client_id} using Adam')
+            logging.info(f'Client {self.client_id} using Adam')
+        else:
+            logging.info(f'Client {self.client_id} using SGD')
+            print(f'Client {self.client_id} using SGD')
+
+        if self.config.proto:
+            logging.info(f'Client {self.client_id} [启用] 原型引导模块 (Prototype Guidance)')
+            print(f'Client {self.client_id} [启用] 原型引导模块 (Prototype Guidance)')
+        if self.config.mix:
+            logging.info(f'Client {self.client_id} [启用] 数据混合增强模块 (Mixup)')
+            print(f'Client {self.client_id} [启用] 数据混合增强模块 (Mixup)')
+        if self.config.ga:
+            logging.info(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
+            print(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
+
         # 1. 加载全局模型参数
         self.local_model.load_state_dict(global_model_state_dict)
 
@@ -638,10 +657,10 @@ class Client:
         # # 3. 初始化优化器
         if self.config.optimizer.lower() == "adam":
             self.optimizer = torch.optim.Adam(self.local_model.parameters(), lr=self.config.lr)
-            print(f'client {self.client_id} using adam ')
+            # print(f'client {self.client_id} using adam ')
         else:
             self.optimizer = torch.optim.SGD(self.local_model.parameters(), lr=self.config.lr, momentum=self.config.momentum)
-            print(f'client {self.client_id} using sgd ')
+            # print(f'client {self.client_id} using sgd ')
 
         # 4. 开启训练模式 & 注册特征提取 Hook
         self.local_model.train()
@@ -660,11 +679,16 @@ class Client:
         # if self.config.ga: print(f"client{self.client_id} using lga")
         if global_prototypes is not None: print(f"client{self.client_id} using prototype_guidance")
         
+           
+
+
         for epoch in range(self.epochs):
             
             total_samples = 0
             train_loss = 0
             train_acc = 0
+            c = 0
+
 
             for data, target, candidates, idxs in self.train_loader:
                 data = data.to(self.device)
@@ -690,6 +714,7 @@ class Client:
                 # --- Loss 3: Mixup (可选) ---
                 mix_loss = 0.0
                 if self.config.mix == True:
+
                     mix_loss = self.pll_mix_up_loss(data=data, idxs=idxs, global_model_state_dict=global_model_state_dict)
 
                 # --- Loss 4: Gradient Alignment (可选) ---

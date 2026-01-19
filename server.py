@@ -38,8 +38,6 @@ class Server:
         self.config = config
         self.device = self.config.device
         self.global_model = None
-        # self.clients = []
-        self.clients: List[Client] = []
         self.weights =  []
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
@@ -97,22 +95,7 @@ class Server:
 
 
     def pre(self):
-        # torch.manual_seed(42)
-        # class_idxs = {}
-        # splits = {}
-        # for i in range(len(self.train_dataset)):
-        #     _, target = self.train_dataset[i]
-        #     if not class_idxs.has_key(target):
-        #         class_idxs[target] = []
-        #     class_idxs[target].append(i)
-        
-        
-        # for key in class_idxs:
-        #     perm = torch.randperm(len(class_idxs[key]))    # �����������
-        #     shuffled = class_idxs[key][perm]               # �����������������ţ�
-        #     class_idxs[key] = shuffled
 
-        #     splits[key] = np.array_split(class_idxs[key], self.config.num_clients)
 
         self.global_model = model.get_model(self.config.model_name).to(self.device)
         client_train_dataset = []
@@ -227,7 +210,7 @@ class Server:
                 # [FedODP 关键修改]
                 # 训练完后，让 Client 贡献它的“情报”（本地原型）
                 # 建议：前几轮 (Warm-up) 模型太差，不要收集，以免污染库
-                if r >= 5: 
+                if r >= self.config.warmup: 
                     # threshold=0.8 表示只确信度>0.8的才上传
                     local_protos = client.get_local_prototypes(threshold=0.8)
                     if len(local_protos) > 0:
@@ -255,6 +238,9 @@ class Server:
             acc.append(test_acc)
 
             logger = self.logger
+            # 记录每个客户端归一化熵标准的变化
+            for client in self.clients:
+                logger.info(f"Client {client.client_id}: norm entropy = {client.norm_entropy:.4f}")
 
             all_client_accs = []
             for client in self.clients:
@@ -267,8 +253,8 @@ class Server:
             global_avg_acc = np.mean(all_client_accs)
             logger.info(f"Round {r} Global Avg Disambiguation Acc: {global_avg_acc:.4f}")
 
-            if r == 0 or (r + 1) % 5 == 0:
-                
+            #每轮都测试一次泛化能力
+            if r >= 0:
                 for client in self.clients:
                     client_test_acc = client.test(test_loader=clients_test_loaders[client.client_id], 
                                 epoch = r,

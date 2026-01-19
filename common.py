@@ -61,7 +61,8 @@ class ExperimentConfig(BaseModel):
 
     # 显卡
     device: str = ""
-
+    
+    warmup: int = 5
     # --- [工业级] 校验逻辑 ---
     @field_validator('lr')
     def check_lr_positive(cls, v):
