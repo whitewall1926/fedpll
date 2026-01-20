@@ -279,7 +279,7 @@ class Server:
         mean_acc = np.mean(last_10_acc)
         std_acc = np.std(last_10_acc)
         # 3. 格式化打印 (保留 2 位小数，带上 ± 标准差)
-        log_msg = f'Result: Last 10 Rounds Avg: {mean_acc:.2f}% ± {std_acc:.2f}%'
+        log_msg = f'Result: Last 10 Rounds Avg: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%'
         logger.info(log_msg)
         print(log_msg)
 

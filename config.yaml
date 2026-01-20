@@ -24,4 +24,4 @@ proto: true
 device: cuda:1
 
 # 热启动轮数
-warmup: 35
+warmup: 30
