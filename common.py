@@ -58,11 +58,15 @@ class ExperimentConfig(BaseModel):
 
     exp_id: str = ""   
     exp_name: str = ""
-
+    
     # 显卡
     device: str = ""
     
     warmup: int = 5
+    
+    # 筛选上传原型的样本的标准
+    mask_mode: str = "entropy"
+    
     # --- [工业级] 校验逻辑 ---
     @field_validator('lr')
     def check_lr_positive(cls, v):

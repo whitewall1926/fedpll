@@ -574,15 +574,33 @@ class Client:
                 
                 logits = self.local_model(data) # Forward 触发 Hook
                 features = self.features_buffer.get('feat') # [B, D]
-                # norm_entropy = self.get_uncertainty_entropy_masked(*logits=logits, candidates=candidates)
 
-                # 使用平滑过的 q 向量来判断置信度
-                qs = self.q[idxs]
-                max_vals, max_ids = qs.max(dim=1)
+
                 
-                # 筛选高置信度样本
-                mask = max_vals > threshold
+                if self.config.mask_mode == "entropy":
+                    # print(f'根据熵 {self.norm_entropy}上传低熵样本原型')
+                    probs = torch.softmax(logits, dim=1)
+                    max_vals, max_ids = probs.max(dim=1) # 伪标签来自当前
+                    norm_entropy = self.get_uncertainty_entropy_masked(logits=logits, candidates=candidates)
+                    mask = norm_entropy < self.norm_entropy
+                elif self.config.mask_mode == "confidence":
+                    #  使用平滑过的 q 向量来判断置信度
+                    # 
+                    # print(f'根据历史向量q 筛选高置信度样本')
+                    qs = self.q[idxs]
+                    max_vals, max_ids = qs.max(dim=1)
 
+                    mask = max_vals > threshold
+                else:
+                    raise ValueError(
+                            f"Invalid mask_mode: '{self.config.mask_mode}'. "
+                            f"Supported modes are: ['entropy', 'confidence']"
+                        )
+                
+
+                
+               
+                
                 if mask.sum() == 0: continue
                 
                 confident_feats = features[mask]
@@ -679,9 +697,6 @@ class Client:
         # if self.config.ga: print(f"client{self.client_id} using lga")
         if global_prototypes is not None: print(f"client{self.client_id} using prototype_guidance")
         
-           
-
-
         for epoch in range(self.epochs):
             
             total_samples = 0

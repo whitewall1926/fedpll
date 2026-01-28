@@ -25,3 +25,6 @@ device: cuda:1
 
 # 热启动轮数
 warmup: 30
+
+# 筛选上传原型的样本的标准
+mask_mode: entropy

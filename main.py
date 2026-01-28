@@ -127,7 +127,7 @@ if __name__ == "__main__":
                 transforms.ToTensor(),
                 transforms.Normalize(mean, std)
             ])
-
+            
             train_dataset = datasets.CIFAR10(root='./data', train=True, transform=transform_train, download=True)
             test_dataset = datasets.CIFAR10(root='./data', train=False, transform=transform_test, download=True)
 
