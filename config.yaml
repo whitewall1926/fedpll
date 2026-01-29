@@ -18,7 +18,7 @@ mixup_alpha: 0.2
 lc: true
 mix: false
 ga: false
-uniform: true
+uniform: false
 proto: true
 
 device: cuda:1
