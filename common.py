@@ -629,6 +629,9 @@ def generate_candidates(model, data_loader, device, noise_rate, num_classes=10):
             # 4. 【关键】抑制真值 (只看错误项)
             probs[gt_mask.bool()] = 0
             
+            # 为了后面兜底用，先存一份纯净的 instance-dependent 权重
+            fallback_probs = probs.clone()
+
             # 5. 【关键】Max 归一化
             # 让最像真的那个错误项概率变为 1.0
             max_val, _ = probs.max(dim=1, keepdim=True)
@@ -651,6 +654,30 @@ def generate_candidates(model, data_loader, device, noise_rate, num_classes=10):
             final_candidates = gt_mask + noise_mask
             final_candidates[final_candidates > 1.0] = 1.0
             
+            # ==========================================
+            # 9. [CRITICAL FIX] 强制翻转兜底 (Force Flip)
+            # ==========================================
+            # 检查每个样本现在的候选集大小
+            candidate_counts = final_candidates.sum(dim=1)
+            
+            # 找到那些 "不幸" 没有生成任何噪音的样本索引 (sum == 1 说明只有 GT)
+            failed_indices = (candidate_counts == 1).nonzero(as_tuple=True)[0]
+            
+            if len(failed_indices) > 0:
+                # 既然要做 Instance-Dependent，兜底也不能瞎选。
+                # 从 fallback_probs (已经去掉了真值) 中，按概率采样一个最容易混淆的类
+                target_probs = fallback_probs[failed_indices]
+                
+                # 防止全0概率导致报错 (极少数情况)，加一个极小 epsilon
+                target_probs = target_probs + 1e-6
+                
+                # 采样出一个补救的索引
+                # multinomial 返回形状 [Num_Failed, 1]
+                new_noise_indices = torch.multinomial(target_probs, 1).squeeze(1)
+                
+                # 强制把这个位置置为 1
+                # final_candidates[行号, 列号] = 1
+                final_candidates[failed_indices, new_noise_indices] = 1.0
             all_candidates.append(final_candidates.cpu())
             
     return torch.cat(all_candidates, dim=0)
