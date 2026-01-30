@@ -657,7 +657,10 @@ class Client:
             print(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
 
         # 1. 加载全局模型参数
-        self.local_model.load_state_dict(global_model_state_dict)
+        if self.config.upmodel == True:
+            print(f'客户端 {self.client_id}启用共享模型开关')
+            self.local_model.load_state_dict(global_model_state_dict)
+
 
 
 

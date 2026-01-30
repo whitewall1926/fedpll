@@ -67,6 +67,9 @@ class ExperimentConfig(BaseModel):
     # 筛选上传原型的样本的标准
     mask_mode: str = "entropy"
     
+    # 是否共享模型
+    upmodel: bool = True
+
     # --- [工业级] 校验逻辑 ---
     @field_validator('lr')
     def check_lr_positive(cls, v):
