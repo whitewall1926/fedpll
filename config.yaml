@@ -2,7 +2,7 @@ seed: 42
 local_epochs: 10
 batch_size: 128
 optimizer: sgd
-lr: 0.1
+lr: 0.0001
 momentum: 0.5
 model_name: resnet18
 dataset: SVHN
