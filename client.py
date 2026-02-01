@@ -60,7 +60,7 @@ class Client:
             id_all_candidates = common.generate_candidates(model=resnet18, 
                                                         data_loader=gen_loader,
                                                         device='cuda',
-                                                        noise_rate=0.3,
+                                                        noise_rate=self.config.noise_level,
                                                         num_classes=10)
             print(id_all_candidates[:3])
         
