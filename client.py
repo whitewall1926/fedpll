@@ -571,6 +571,7 @@ class Client:
             for batch in self.train_loader:
                 data, target, candidates, idxs = batch
                 data = data.to(self.device)
+                target = target.to(self.device)
                 
                 logits = self.local_model(data) # Forward 触发 Hook
                 features = self.features_buffer.get('feat') # [B, D]
@@ -596,15 +597,12 @@ class Client:
                             f"Invalid mask_mode: '{self.config.mask_mode}'. "
                             f"Supported modes are: ['entropy', 'confidence']"
                         )
-                
-
-                
-               
-                
                 if mask.sum() == 0: continue
                 
                 confident_feats = features[mask]
-                confident_labels = max_ids[mask]
+                # confident_labels = max_ids[mask]
+                #作弊的方式检查原型质量问题
+                confident_labels = target[mask]
                 
                 for f, l in zip(confident_feats, confident_labels):
                     label = l.item()
