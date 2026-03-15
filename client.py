@@ -660,10 +660,7 @@ class Client:
             self.local_model.load_state_dict(global_model_state_dict)
 
 
-
-
-       
-
+      
         self.global_model = copy.deepcopy(self.local_model)
         self.global_model.eval()
         

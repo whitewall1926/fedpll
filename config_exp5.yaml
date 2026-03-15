@@ -6,7 +6,6 @@ lr: 0.001
 momentum: 0.5
 model_name: resnet18
 dataset: SVHN
-noise_level: 0.3
 rounds: 200
 num_classes: 10
 num_clients: 10
@@ -18,13 +17,16 @@ mixup_alpha: 0.2
 lc: true
 mix: false
 ga: false
+
+noise_level: 0.5
 uniform: false
+
 proto: true
 
 # 是否共享模型
 upmodel: true
 
-device: cuda:1
+device: cuda:0
 
 # 热启动轮数
 warmup: 30

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 class CNN(nn.Module):
     def __init__(self):
         super(CNN, self).__init__()
-
+        
         self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -46,27 +46,27 @@ class CNN3(nn.Module):
 class SmallCNN(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
-        # ¾í»ý²ã 1: 3Í¨µÀ -> 32Í¨µÀ, kernel=3, padding=1 ±£³Ö³ß´ç
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 1: 3Í¨ï¿½ï¿½ -> 32Í¨ï¿½ï¿½, kernel=3, padding=1 ï¿½ï¿½ï¿½Ö³ß´ï¿½
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
         
-        # ¾í»ý²ã 2: 32 -> 64
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 2: 32 -> 64
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
         
-        # ¾í»ý²ã 3: 64 -> 128
+        # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 3: 64 -> 128
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
         
-        # ¿ÉÑ¡¾í»ý²ã 4
+        # ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 4
         # self.conv4 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
         # self.bn4 = nn.BatchNorm2d(256)
         
-        # È«Á¬½Ó²ã
-        self.fc1 = nn.Linear(128*4*4, 256)  # ¼ÙÉè³Ø»¯ºóÌØÕ÷Í¼Îª4x4
+        # È«ï¿½ï¿½ï¿½Ó²ï¿½
+        self.fc1 = nn.Linear(128*4*4, 256)  # ï¿½ï¿½ï¿½ï¿½Ø»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Îª4x4
         self.fc2 = nn.Linear(256, num_classes)
         
-        # ×î´ó³Ø»¯
+        # ï¿½ï¿½ï¿½Ø»ï¿½
         self.pool = nn.MaxPool2d(2,2)
         # Dropout
         self.dropout = nn.Dropout(0.25)
@@ -78,7 +78,7 @@ class SmallCNN(nn.Module):
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         # Conv3 -> ReLU -> Pool -> BN
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
-        # Èç¹ûÓÐconv4, ¿ÉÒÔ¼ÓÕâÀï
+        # ï¿½ï¿½ï¿½ï¿½ï¿½conv4, ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½
         # x = self.pool(F.relu(self.bn4(self.conv4(x))))
         
         # Flatten
@@ -92,7 +92,7 @@ class SmallCNN(nn.Module):
 class LeNet5(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)   # ÊäÈë3Í¨µÀ
+        self.conv1 = nn.Conv2d(3, 6, 5)   # ï¿½ï¿½ï¿½ï¿½3Í¨ï¿½ï¿½
         self.conv2 = nn.Conv2d(6, 16, 5)
         self.fc1 = nn.Linear(16*5*5, 120)
         self.fc2 = nn.Linear(120, 84)
@@ -115,10 +115,10 @@ def get_resnet18(num_classes=10, pretrained=False):
     # if not pretrained:
     #     model = resnet18(weights=None)
     model = resnet18(pretrained=pretrained)
-    # ÊÊÅä 32x32£ºÐ¡ kernel + È¥µôµÚÒ»¸ö maxpool
+    # ï¿½ï¿½ï¿½ï¿½ 32x32ï¿½ï¿½Ð¡ kernel + È¥ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ maxpool
     model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
     model.maxpool = nn.Identity()
-    # ¸Ä×îºóÒ»²ãÊä³öÀà±ðÊý
+    # ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
