@@ -55,6 +55,7 @@ class ExperimentConfig(BaseModel):
     ga: bool           # Gradient Alignment
     uniform: bool
     proto: bool        # Prototype
+    fedsa: bool = False
 
     exp_id: str = ""   
     exp_name: str = ""
@@ -69,6 +70,18 @@ class ExperimentConfig(BaseModel):
     
     # 是否共享模型
     upmodel: bool = True
+
+    # --- FedSA 超参数 ---
+    fedsa_lambda_reg: float = 0.1
+    fedsa_lambda_mcl: float = 0.01
+    fedsa_lambda_cc: float = 1.0
+    fedsa_anchor_ema: float = 0.9999
+    fedsa_anchor_init_std: float = 1.0
+
+    # --- 伪标签投票设置 ---
+    use_vote_pseudo: bool = False
+    vote_num_models: int = 10
+    vote_restrict_to_candidates: bool = True
 
     # --- [工业级] 校验逻辑 ---
     @field_validator('lr')

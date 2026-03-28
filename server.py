@@ -46,9 +46,44 @@ class Server:
         self.logger = logger
         # [FedODP 新增] 全局原型库 {class_id: tensor}
         self.global_prototypes = {}
+        self.semantic_anchors = None
     
         # 配置本地测试集
         self.client_test_datasets = None
+
+    def _get_classifier_input_dim(self) -> int:
+        model_ref = self.global_model
+
+        if hasattr(model_ref, 'fc') and isinstance(model_ref.fc, torch.nn.Linear):
+            return model_ref.fc.in_features
+        if hasattr(model_ref, 'fc2') and isinstance(model_ref.fc2, torch.nn.Linear):
+            return model_ref.fc2.in_features
+        if hasattr(model_ref, 'fc3') and isinstance(model_ref.fc3, torch.nn.Linear):
+            return model_ref.fc3.in_features
+        if hasattr(model_ref, 'classifier') and isinstance(model_ref.classifier[-1], torch.nn.Linear):
+            return model_ref.classifier[-1].in_features
+
+        raise AttributeError(f"Unsupported classifier head for model type: {type(model_ref)}")
+
+    def initialize_semantic_anchors(self):
+        feature_dim = self._get_classifier_input_dim()
+        anchors = torch.randn(
+            self.config.num_classes,
+            feature_dim,
+            device=self.device,
+        ) * self.config.fedsa_anchor_init_std
+        self.semantic_anchors = torch.nn.functional.normalize(anchors, p=2, dim=1)
+
+    def compute_anchor_margin(self, anchors: Optional[torch.Tensor]) -> float:
+        if anchors is None or anchors.size(0) < 2:
+            return 0.0
+
+        normalized = torch.nn.functional.normalize(anchors, p=2, dim=1)
+        pairwise_dist = torch.cdist(normalized, normalized, p=2)
+        valid_mask = ~torch.eye(pairwise_dist.size(0), dtype=torch.bool, device=pairwise_dist.device)
+        if valid_mask.sum() == 0:
+            return 0.0
+        return float(pairwise_dist[valid_mask].mean().item())
 
                     
 
@@ -98,6 +133,8 @@ class Server:
 
 
         self.global_model = model.get_model(self.config.model_name).to(self.device)
+        if self.config.fedsa:
+            self.initialize_semantic_anchors()
         client_train_dataset = []
 
         if self.config.partition.lower() == "iid":
@@ -190,7 +227,16 @@ class Server:
             selected_clients = random.sample(self.clients, k)
             print(f"number: {k}, selected clients: {[self.clients.index(client) for client in selected_clients]}")
 
+            vote_model_state_dicts = None
+            if self.config.use_vote_pseudo:
+                num_vote_models = min(self.config.vote_num_models, len(self.clients))
+                vote_model_state_dicts = [
+                    copy.deepcopy(client.local_model.state_dict())
+                    for client in self.clients[:num_vote_models]
+                ]
+
             selected_weights = [self.weights[self.clients.index(client)] for client in selected_clients]
+            global_anchor_margin = self.compute_anchor_margin(self.semantic_anchors) if self.config.fedsa else 0.0
 
             # 计算全局梯度 (GA Loss 用，保持不变)
             global_grad_vector = self.aggregate_flattened_gradients(selected_clients, num_batches_per_client=1)
@@ -203,7 +249,10 @@ class Server:
                     global_model_state_dict=self.global_model.state_dict(), 
                     roud=r, 
                     global_prototypes=self.global_prototypes, # <--- 传情报
-                    global_grad_vector=global_grad_vector
+                    semantic_anchors=self.semantic_anchors.detach().clone() if self.semantic_anchors is not None else None,
+                    global_anchor_margin=global_anchor_margin,
+                    global_grad_vector=global_grad_vector,
+                    vote_model_state_dicts=vote_model_state_dicts,
                 )
                 state_dicts.append(state_dict)
                 
@@ -212,7 +261,7 @@ class Server:
                 # 建议：前几轮 (Warm-up) 模型太差，不要收集，以免污染库
                 if r >= self.config.warmup: 
                     # threshold=0.8 表示只确信度>0.8的才上传
-                    local_protos = client.get_local_prototypes(threshold=0.8)
+                    local_protos = client.get_local_prototype_stats(threshold=0.8)
                     if len(local_protos) > 0:
                         local_prototypes_collect.append(local_protos)
 
@@ -232,7 +281,8 @@ class Server:
             test_acc = self.eval(test_loader=test_loader)
             wandb.log({
                 "sevrer_test/acc": test_acc,
-                "server/covered_classes": len(self.global_prototypes)
+                "server/covered_classes": len(self.global_prototypes),
+                "server/global_anchor_margin": global_anchor_margin
             }, step=r)
             print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
             acc.append(test_acc)
@@ -321,42 +371,41 @@ class Server:
     # --- [FedODP] 聚合原型 ---
     def aggregate_prototypes(self, clients_prototypes_list):
         """
-        聚合来自 Client 的本地原型，更新全局原型库。
-        采用 Momentum Update (动量更新) 以保持特征库的稳定性。
+        聚合来自 Client 的本地原型，按类别样本数加权更新全局原型。
+        当启用 FedSA 时，进一步使用 EMA 更新 semantic anchors。
         """
-        # 1. 临时累加容器
         new_protos_sum = {}
         new_protos_count = {}
         
-        # 2. 遍历所有 Client 上传的原型字典
         for client_protos in clients_prototypes_list:
-            for k, p in client_protos.items():
-                p = p.to(self.device)
+            for k, item in client_protos.items():
+                p = item['prototype'].to(self.device)
+                count = item['count']
                 
                 if k not in new_protos_sum:
-                    new_protos_sum[k] = p
-                    new_protos_count[k] = 1
+                    new_protos_sum[k] = p * count
+                    new_protos_count[k] = count
                 else:
-                    new_protos_sum[k] += p
-                    new_protos_count[k] += 1
+                    new_protos_sum[k] += p * count
+                    new_protos_count[k] += count
         
-        # 3. 计算本轮平均值并更新全局
-        # alpha = 0.5 # 动量系数 (0.5 表示新旧各占一半，可调)
-        alpha = 0.99 # 动量系数 (0.99 相信历史)
-
         for k in new_protos_sum:
-            # 计算本轮上传者的平均特征
             current_round_avg = new_protos_sum[k] / new_protos_count[k]
             current_round_avg = torch.nn.functional.normalize(current_round_avg, p=2, dim=0)
-            
-            if k not in self.global_prototypes:
-                # 如果是新发现的类别，直接存入
+
+            if self.config.fedsa and self.semantic_anchors is not None:
                 self.global_prototypes[k] = current_round_avg
+                alpha = self.config.fedsa_anchor_ema
+                updated_anchor = alpha * self.semantic_anchors[k] + (1 - alpha) * current_round_avg
+                self.semantic_anchors[k] = torch.nn.functional.normalize(updated_anchor, p=2, dim=0)
             else:
-                # 如果已有记录，进行动量更新
-                old_proto = self.global_prototypes[k]
-                new_proto = alpha * old_proto + (1 - alpha) * current_round_avg
-                self.global_prototypes[k] = torch.nn.functional.normalize(new_proto, p=2, dim=0)
+                alpha = 0.99
+                if k not in self.global_prototypes:
+                    self.global_prototypes[k] = current_round_avg
+                else:
+                    old_proto = self.global_prototypes[k]
+                    new_proto = alpha * old_proto + (1 - alpha) * current_round_avg
+                    self.global_prototypes[k] = torch.nn.functional.normalize(new_proto, p=2, dim=0)
 
         return self.global_prototypes
     

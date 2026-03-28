@@ -13,7 +13,7 @@ from common import denormalize_image, svhn_mean, svhn_std
 import model
 import common
 from tqdm import tqdm
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
 import logging
 from common import GlobalConfig, ExperimentConfig
 from datetime import datetime
@@ -217,6 +217,8 @@ class Client:
         # [!! 修改结束 !!]
 
         self.local_model = copy.deepcopy(local_model).to(self.device)
+        self.vote_model = copy.deepcopy(local_model).to(self.device)
+        self.vote_model.eval()
 
         
         
@@ -446,6 +448,186 @@ class Client:
             self.hook_handle.remove()
             self.hook_handle = None
 
+    def _get_classifier_layer(self):
+        model = self.local_model
+
+        if hasattr(model, 'fc') and isinstance(model.fc, torch.nn.Linear):
+            return model.fc
+        if hasattr(model, 'fc2') and isinstance(model.fc2, torch.nn.Linear):
+            return model.fc2
+        if hasattr(model, 'fc3') and isinstance(model.fc3, torch.nn.Linear):
+            return model.fc3
+        if hasattr(model, 'classifier'):
+            classifier = model.classifier[-1]
+            if isinstance(classifier, torch.nn.Linear):
+                return classifier
+
+        raise AttributeError(f"Unsupported classifier head for model type: {type(model)}")
+
+    def _infer_pseudo_labels(self, idxs, candidates):
+        q_batch = self.q[idxs].detach().to(self.device)
+        cand_mask = candidates.to(self.device).bool()
+        masked_q = q_batch.masked_fill(~cand_mask, -1e9)
+
+        invalid_rows = (~cand_mask).all(dim=1)
+        if invalid_rows.any():
+            masked_q[invalid_rows] = q_batch[invalid_rows]
+
+        confidences, pseudo_labels = masked_q.max(dim=1)
+        return pseudo_labels, confidences
+
+    def _majority_vote_pseudo_labels(
+        self,
+        data: torch.Tensor,
+        candidates: torch.Tensor,
+        vote_model_state_dicts: Optional[List[Dict[str, torch.Tensor]]],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not vote_model_state_dicts:
+            return None, None
+
+        num_classes = self.config.num_classes
+        cand_mask = candidates.to(self.device).bool()
+        all_preds = []
+
+        with torch.no_grad():
+            for state_dict in vote_model_state_dicts:
+                self.vote_model.load_state_dict(state_dict)
+                self.vote_model.eval()
+
+                logits = self.vote_model(data)
+                if self.config.vote_restrict_to_candidates:
+                    logits = logits.masked_fill(~cand_mask, -1e9)
+                    invalid_rows = (~cand_mask).all(dim=1)
+                    if invalid_rows.any():
+                        logits[invalid_rows] = self.vote_model(data[invalid_rows])
+
+                pred = logits.argmax(dim=1)
+                all_preds.append(pred)
+
+        if len(all_preds) == 0:
+            return None, None
+
+        vote_preds = torch.stack(all_preds, dim=0)
+        vote_counts = F.one_hot(vote_preds, num_clases=num_classes).sum(dim=0).float()
+        confidences, pseudo_labels = vote_counts.max(dim=1)
+        confidences = confidences / float(len(all_preds))
+        return pseudo_labels, confidences
+
+    def pll_loss_with_external_pseudo(self, output, idxs, pseudo_labels, miu=0.99):
+        q = self.q
+        batch_size = output.size(0)
+        p = torch.zeros_like(output)
+        p[torch.arange(batch_size, device=output.device), pseudo_labels] = 1.0
+
+        q[idxs] = q[idxs] * miu + (1 - miu) * p
+
+        log_probs = torch.log_softmax(output, dim=1)
+        loss = -(q[idxs] * log_probs).sum(dim=1).mean()
+        return loss
+
+    def _build_batch_prototypes(
+        self,
+        features: Optional[torch.Tensor],
+        pseudo_labels: torch.Tensor,
+        confidences: Optional[torch.Tensor] = None,
+        confidence_threshold: Optional[float] = None,
+    ) -> Tuple[Dict[int, torch.Tensor], Dict[int, int]]:
+        if features is None or features.numel() == 0:
+            return {}, {}
+
+        normalized_features = F.normalize(features, p=2, dim=1)
+        prototypes: Dict[int, torch.Tensor] = {}
+        counts: Dict[int, int] = {}
+
+        for class_id in pseudo_labels.unique():
+            class_mask = pseudo_labels == class_id
+            if confidences is not None and confidence_threshold is not None:
+                class_mask = class_mask & (confidences > confidence_threshold)
+
+            if class_mask.sum() == 0:
+                continue
+
+            mean_proto = normalized_features[class_mask].mean(dim=0)
+            label = int(class_id.item())
+            prototypes[label] = F.normalize(mean_proto, p=2, dim=0)
+            counts[label] = int(class_mask.sum().item())
+
+        return prototypes, counts
+
+    def _mean_pairwise_distance(self, representations: List[torch.Tensor]) -> torch.Tensor:
+        if len(representations) < 2:
+            return torch.tensor(0.0, device=self.device)
+
+        stacked = torch.stack(representations, dim=0)
+        pairwise_dist = torch.cdist(stacked, stacked, p=2)
+        valid_mask = ~torch.eye(pairwise_dist.size(0), dtype=torch.bool, device=pairwise_dist.device)
+        return pairwise_dist[valid_mask].mean()
+
+    def fedsa_anchor_regularization_loss(self, batch_prototypes, semantic_anchors):
+        if semantic_anchors is None or len(batch_prototypes) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        anchors = F.normalize(semantic_anchors.to(self.device), p=2, dim=1)
+        loss = torch.tensor(0.0, device=self.device)
+        count = 0
+
+        for class_id, proto in batch_prototypes.items():
+            if class_id >= anchors.size(0):
+                continue
+            loss = loss + torch.norm(proto - anchors[class_id], p=2)
+            count += 1
+
+        if count == 0:
+            return torch.tensor(0.0, device=self.device)
+        return loss / count
+
+    def fedsa_margin_contrastive_loss(self, batch_prototypes, semantic_anchors, global_anchor_margin=0.0):
+        if semantic_anchors is None or len(batch_prototypes) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        anchors = F.normalize(semantic_anchors.to(self.device), p=2, dim=1)
+        local_margin = self._mean_pairwise_distance(list(batch_prototypes.values()))
+        global_margin = torch.tensor(global_anchor_margin, device=self.device, dtype=anchors.dtype)
+        client_margin = torch.maximum(local_margin, global_margin)
+
+        loss = torch.tensor(0.0, device=self.device)
+        count = 0
+
+        for class_id, proto in batch_prototypes.items():
+            if class_id >= anchors.size(0):
+                continue
+
+            dist_all = torch.norm(anchors - proto.unsqueeze(0), p=2, dim=1)
+            pos_dist = dist_all[class_id]
+            numerator = torch.exp(-(pos_dist + client_margin))
+
+            negative_mask = torch.ones(anchors.size(0), dtype=torch.bool, device=self.device)
+            negative_mask[class_id] = False
+            denominator = numerator + torch.exp(-dist_all[negative_mask]).sum()
+
+            loss = loss - torch.log(numerator / (denominator + 1e-12) + 1e-12)
+            count += 1
+
+        if count == 0:
+            return torch.tensor(0.0, device=self.device)
+        return loss / count
+
+    def fedsa_classifier_calibration_loss(self, semantic_anchors):
+        if semantic_anchors is None:
+            return torch.tensor(0.0, device=self.device)
+
+        classifier = self._get_classifier_layer()
+        anchors = F.normalize(semantic_anchors.to(self.device), p=2, dim=1)
+
+        if classifier.in_features != anchors.size(1):
+            raise ValueError(
+                f"FedSA anchor dimension mismatch: classifier expects {classifier.in_features}, got {anchors.size(1)}"
+            )
+
+        logits = F.linear(anchors, classifier.weight, classifier.bias)
+        targets = torch.arange(anchors.size(0), device=self.device)
+        return F.cross_entropy(logits, targets)
+
     # --- [FedODP] 2. 原型指导 Loss (求助) ---
     def prototype_guidance_loss(self, features, output, candidates, global_prototypes, temperature=0.1, alpha = 0.99):
         if global_prototypes is None or len(global_prototypes) == 0:
@@ -560,7 +742,7 @@ class Client:
     
 
     # --- [FedODP] 3. 计算本地原型 (贡献) ---
-    def get_local_prototypes(self, threshold=0.8):
+    def get_local_prototype_stats(self, threshold=0.8):
         self.local_model.eval()
         self._register_hook() 
         
@@ -575,23 +757,15 @@ class Client:
                 
                 logits = self.local_model(data) # Forward 触发 Hook
                 features = self.features_buffer.get('feat') # [B, D]
+                pseudo_labels, confidences = self._infer_pseudo_labels(idxs, candidates)
 
 
                 
                 if self.config.mask_mode == "entropy":
-                    # print(f'根据熵 {self.norm_entropy}上传低熵样本原型')
-                    probs = torch.softmax(logits, dim=1)
-                    max_vals, max_ids = probs.max(dim=1) # 伪标签来自当前
                     norm_entropy = self.get_uncertainty_entropy_masked(logits=logits, candidates=candidates)
                     mask = norm_entropy < self.norm_entropy
                 elif self.config.mask_mode == "confidence":
-                    #  使用平滑过的 q 向量来判断置信度
-                    # 
-                    # print(f'根据历史向量q 筛选高置信度样本')
-                    qs = self.q[idxs]
-                    max_vals, max_ids = qs.max(dim=1)
-
-                    mask = max_vals > threshold
+                    mask = confidences > threshold
                 else:
                     raise ValueError(
                             f"Invalid mask_mode: '{self.config.mask_mode}'. "
@@ -599,10 +773,8 @@ class Client:
                         )
                 if mask.sum() == 0: continue
                 
-                confident_feats = features[mask]
-                # confident_labels = max_ids[mask]
-                #作弊的方式检查原型质量问题
-                confident_labels = target[mask]
+                confident_feats = F.normalize(features[mask], p=2, dim=1)
+                confident_labels = pseudo_labels[mask]
                 
                 for f, l in zip(confident_feats, confident_labels):
                     label = l.item()
@@ -619,17 +791,27 @@ class Client:
         final_prototypes = {}
         for k in prototypes:
             mean_proto = prototypes[k] / counts[k]
-            final_prototypes[k] = F.normalize(mean_proto, p=2, dim=0).cpu() # 转回 CPU 方便传输
+            final_prototypes[k] = {
+                'prototype': F.normalize(mean_proto, p=2, dim=0).cpu(),
+                'count': counts[k]
+            }
             
         return final_prototypes
+
+    def get_local_prototypes(self, threshold=0.8):
+        prototype_stats = self.get_local_prototype_stats(threshold=threshold)
+        return {class_id: item['prototype'] for class_id, item in prototype_stats.items()}
     
 
     def train(self, 
             global_model_state_dict, 
             roud,
             global_prototypes=None, # [FedODP] 新增参数
+            semantic_anchors=None,
+            global_anchor_margin=0.0,
             new_config=None,
-            global_grad_vector=None):
+            global_grad_vector=None,
+            vote_model_state_dicts=None):
         
         if new_config != None:
             self.config = None
@@ -653,6 +835,9 @@ class Client:
         if self.config.ga:
             logging.info(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
             print(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
+        if self.config.fedsa:
+            logging.info(f'Client {self.client_id} [启用] FedSA Semantic Anchors')
+            print(f'Client {self.client_id} [启用] FedSA Semantic Anchors')
 
         # 1. 加载全局模型参数
         if self.config.upmodel == True:
@@ -696,7 +881,10 @@ class Client:
         # print(f"client{self.client_id} using lc_loss")
         # if self.config.mix: print(f"client{self.client_id} using mix_loss")
         # if self.config.ga: print(f"client{self.client_id} using lga")
-        if global_prototypes is not None: print(f"client{self.client_id} using prototype_guidance")
+        if global_prototypes is not None:
+            print(f"client{self.client_id} using prototype_guidance")
+        if semantic_anchors is not None:
+            print(f"client{self.client_id} using semantic_anchors")
         
         for epoch in range(self.epochs):
             
@@ -715,9 +903,23 @@ class Client:
                 
                 # Forward
                 output = self.local_model(data)
+
+                vote_pseudo_labels, _ = self._majority_vote_pseudo_labels(
+                    data=data,
+                    candidates=candidates,
+                    vote_model_state_dicts=vote_model_state_dicts if self.config.use_vote_pseudo else None,
+                )
                 
                 # --- Loss 1: 基础 PLL Loss ---
-                lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99)
+                if vote_pseudo_labels is not None:
+                    lc_loss = self.pll_loss_with_external_pseudo(
+                        output=output,
+                        idxs=idxs,
+                        pseudo_labels=vote_pseudo_labels,
+                        miu=0.99,
+                    )
+                else:
+                    lc_loss = self.pll_loss_vectorized(output=output, idxs=idxs, candidates=candidates, miu=0.99)
 
                 # --- Loss 2: [FedODP] 按需原型检索 Loss ---
                 features = self.features_buffer.get('feat') # 从 Hook 获取特征
@@ -725,16 +927,34 @@ class Client:
                     proto_loss = self.prototype_guidance_loss(features, output, candidates, global_prototypes)
                     # proto_loss = self.prototype_guidance_loss_mse(features, output, candidates, global_prototypes)
                 else:
-                    proto_loss = 0.0
+                    proto_loss = torch.tensor(0.0, device=self.device)
+
+                fedsa_reg_loss = torch.tensor(0.0, device=self.device)
+                fedsa_mcl_loss = torch.tensor(0.0, device=self.device)
+                fedsa_cc_loss = torch.tensor(0.0, device=self.device)
+                if self.config.fedsa == True and semantic_anchors is not None:
+                    pseudo_labels, pseudo_confidences = self._infer_pseudo_labels(idxs, candidates)
+                    batch_prototypes, _ = self._build_batch_prototypes(
+                        features=features,
+                        pseudo_labels=pseudo_labels,
+                        confidences=pseudo_confidences,
+                    )
+                    fedsa_reg_loss = self.fedsa_anchor_regularization_loss(batch_prototypes, semantic_anchors)
+                    fedsa_mcl_loss = self.fedsa_margin_contrastive_loss(
+                        batch_prototypes,
+                        semantic_anchors,
+                        global_anchor_margin=global_anchor_margin,
+                    )
+                    fedsa_cc_loss = self.fedsa_classifier_calibration_loss(semantic_anchors)
                 
                 # --- Loss 3: Mixup (可选) ---
-                mix_loss = 0.0
+                mix_loss = torch.tensor(0.0, device=self.device)
                 if self.config.mix == True:
 
                     mix_loss = self.pll_mix_up_loss(data=data, idxs=idxs, global_model_state_dict=global_model_state_dict)
 
                 # --- Loss 4: Gradient Alignment (可选) ---
-                lga = 0.0
+                lga = torch.tensor(0.0, device=self.device)
                 if self.config.ga == True and g_global_vec is not None:
                     g_local_vec, _ = self.compute_grad_vector(self.local_model, data, q_batch=self.q[idxs], create_graph=True)
                     if g_local_vec.numel() != g_global_vec.numel():
@@ -745,6 +965,9 @@ class Client:
                 # 建议: proto_weight 可以写进 config，这里暂时硬编码为 0.5
                 # loss = lc_loss + mix_loss + lga + 0.5 * proto_loss
                 loss = lc_loss + mix_loss + lga + 1.0 * proto_loss
+                loss = loss + self.config.fedsa_lambda_reg * fedsa_reg_loss
+                loss = loss + self.config.fedsa_lambda_mcl * fedsa_mcl_loss
+                loss = loss + self.config.fedsa_lambda_cc * fedsa_cc_loss
 
                 loss.backward()
 

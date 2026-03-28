@@ -48,6 +48,10 @@ if __name__ == "__main__":
         loss_kind += "_mix"
     if config.ga == True:
         loss_kind += "_ga"
+    if config.proto == True:
+        loss_kind += "_proto"
+    if config.fedsa == True:
+        loss_kind += "_fedsa"
     
          
     with wandb.init(
