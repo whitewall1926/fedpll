@@ -482,6 +482,12 @@ class Client:
         candidates: torch.Tensor,
         vote_model_state_dicts: Optional[List[Dict[str, torch.Tensor]]],
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """生成投票伪标签，返回归一化软标签矩阵
+        
+        Returns:
+            soft_labels: [batch_size, num_classes] 归一化的投票计数（软标签）
+            max_confidences: [batch_size] 每个样本最高投票的归一化置信度
+        """
         if not vote_model_state_dicts:
             return None, None
 
@@ -507,18 +513,43 @@ class Client:
         if len(all_preds) == 0:
             return None, None
 
-        vote_preds = torch.stack(all_preds, dim=0)
-        vote_counts = F.one_hot(vote_preds, num_clases=num_classes).sum(dim=0).float()
-        confidences, pseudo_labels = vote_counts.max(dim=1)
-        confidences = confidences / float(len(all_preds))
-        return pseudo_labels, confidences
+        vote_preds = torch.stack(all_preds, dim=0)  # [num_models, batch_size]
+        batch_size = vote_preds.shape[1]
+        
+        # 创建投票计数矩阵 [batch_size, num_classes]
+        vote_counts = F.one_hot(vote_preds, num_classes=num_classes).sum(dim=0).float()  # [batch_size, num_classes]
+        
+        # 归一化：每个样本的投票计数除以总投票数
+        total_votes = float(len(all_preds))
+        soft_labels = vote_counts / total_votes  # [batch_size, num_classes]
+        
+        # 提取每个样本的最高置信度
+        max_confidences, _ = soft_labels.max(dim=1)
+        
+        return soft_labels, max_confidences
 
     def pll_loss_with_external_pseudo(self, output, idxs, pseudo_labels, miu=0.99):
+        """使用外部伪标签（支持硬标签或软标签）更新 q 向量
+        
+        Args:
+            output: 模型输出 logits [batch_size, num_classes]
+            idxs: 数据集索引 [batch_size]
+            pseudo_labels: 伪标签，可以是 one-hot 硬标签或 [batch_size, num_classes] 软标签
+            miu: EMA 系数
+        """
         q = self.q
         batch_size = output.size(0)
-        p = torch.zeros_like(output)
-        p[torch.arange(batch_size, device=output.device), pseudo_labels] = 1.0
+        
+        # 处理软标签（来自投票函数）或硬标签
+        if pseudo_labels.dim() == 1:
+            # 硬标签：转为 one-hot
+            p = torch.zeros_like(output)
+            p[torch.arange(batch_size, device=output.device), pseudo_labels] = 1.0
+        else:
+            # 软标签：直接使用
+            p = pseudo_labels.to(output.device)
 
+        # EMA 更新 q 向量
         q[idxs] = q[idxs] * miu + (1 - miu) * p
 
         log_probs = torch.log_softmax(output, dim=1)
