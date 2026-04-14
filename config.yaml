@@ -24,7 +24,7 @@ proto: false
 # 是否共享模型
 upmodel: true
 
-device: cuda:1
+device: cuda:0
 
 # 热启动轮数
 warmup: 30
@@ -34,5 +34,5 @@ mask_mode: entropy
 
 # 伪标签投票设置：10个客户端模型多数投票
 use_vote_pseudo: true
-vote_num_models: 5
+vote_num_models: 3
 vote_restrict_to_candidates: true
