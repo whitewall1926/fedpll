@@ -34,5 +34,5 @@ mask_mode: entropy
 
 # 伪标签投票设置：10个客户端模型多数投票
 use_vote_pseudo: true
-vote_num_models: 10
+vote_num_models: 5
 vote_restrict_to_candidates: true
