@@ -19,15 +19,14 @@ import argparse
 
 
 if __name__ == "__main__":
-
-    os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
-    os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
-    os.environ['WANDB_API_KEY'] = "364095e05fdc1c26991c0347c509cfc8a4ef138c" 
-    
     parser = argparse.ArgumentParser(description="联邦偏标记学习实验管理")
     parser.add_argument('--config', type=str, default='config.yaml', help='配置文件')
     args = parser.parse_args()
-    
+
+    if not os.getenv("WANDB_API_KEY"):
+        print("❌ 缺少环境变量 WANDB_API_KEY，请先在 shell 中导出后再运行。")
+        print("   例如: export WANDB_API_KEY=your_wandb_api_key")
+        exit(1)
 
     try:
         config = ExperimentConfig.from_yaml(args.config)
