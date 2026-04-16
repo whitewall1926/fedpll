@@ -1,55 +1,21 @@
-# Python �����ļ�
-__pycache__/
-*.py[cod]
-*$py.class
+test_run_output.log
+*.log
 
-# Jupyter �ʼǱ����������Ҫ���٣�
-*.ipynb
-.ipynb_checkpoints/
-
-# �����ļ���Ŀ¼
-data/
-*.npy  # NumPy�����ļ����������ʱ���ɵģ�
-
-# ��־������ʱ�ļ�
-wandb/ 
-
-
-# ϵͳ�ͱ༭���ļ�
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# ���⻷����������ڣ�
-venv/
-env/
-*.env
-*.venv
-
-# ���ܵĹ���/�����ļ�
-.cache/
-build/
-dist/
-
-temp/
-
-packages.microsoft.gpg
-
-
-*.csv
-*.png*.csv
-*.png
+# Experiment outputs
 csv_logs/
+logs/
 wandb/
-wandb/
-svhn_visual_similarity.npy
-
-
-logs
-
-
+client_*_q_log.csv
+client_*_sample_*.png
+data/
+temp/
+packages.microsoft.gpg
 raw_parsing.py
+svhn_visual_similarity.npy
+test.ipynb
+test2.ipynb
 tests/
+
+# Python cache
+__pycache__/
+*.pyc

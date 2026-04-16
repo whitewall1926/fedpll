@@ -95,6 +95,7 @@ class Client:
         # [!! 新 CSV INIT !!]
         self.q_log_filename = os.path.join(self.log_dir, f'client_{self.client_id}_q_log.csv')
         self.csv_header = "Round,Epoch,Index,TrueLabel,Candidates,QVector\n"
+        self.last_train_metrics = {}
         try:
             # 'w' 模式会覆盖旧实验的日志，这通常是期望的行为
             with open(self.q_log_filename, 'w') as f: 
@@ -903,6 +904,9 @@ class Client:
         
         avg_train_acc = 0
         avg_train_loss = 0
+        total_vote_confidence = 0.0
+        total_vote_correct = 0
+        total_vote_samples = 0
 
         # 初始化用于 CSV/Wandb 记录的列表
         start_epoch_data = []
@@ -940,6 +944,12 @@ class Client:
                     candidates=candidates,
                     vote_model_state_dicts=vote_model_state_dicts if self.config.use_vote_pseudo else None,
                 )
+                if vote_pseudo_labels is not None:
+                    hard_vote_labels = vote_pseudo_labels.argmax(dim=1)
+                    vote_confidences = vote_pseudo_labels.max(dim=1).values
+                    total_vote_confidence += vote_confidences.sum().item()
+                    total_vote_correct += (hard_vote_labels == target).sum().item()
+                    total_vote_samples += target.size(0)
                 
                 # --- Loss 1: 基础 PLL Loss ---
                 if vote_pseudo_labels is not None:
@@ -1061,11 +1071,23 @@ class Client:
         # ----- [!! WANDB LOGGING & CSV LOGGING !!] -----
         avg_train_acc = avg_train_acc * 1.0 / self.epochs
         avg_train_loss = avg_train_loss * 1.0 / self.epochs
+        vote_pseudo_acc = total_vote_correct / total_vote_samples if total_vote_samples > 0 else 0.0
+        vote_conf_mean = total_vote_confidence / total_vote_samples if total_vote_samples > 0 else 0.0
+        self.last_train_metrics = {
+            "train_acc": avg_train_acc,
+            "train_loss": avg_train_loss,
+            "vote_pseudo_acc": vote_pseudo_acc,
+            "vote_confidence": vote_conf_mean,
+            "vote_samples": total_vote_samples,
+        }
 
         logs_to_wandb = {
             f"client_train/{self.client_id}/acc": avg_train_acc,
-            f"client_train/{self.client_id}/loss": avg_train_loss  
+            f"client_train/{self.client_id}/loss": avg_train_loss,
         }
+        if total_vote_samples > 0:
+            logs_to_wandb[f"client_vote/{self.client_id}/pseudo_acc"] = vote_pseudo_acc
+            logs_to_wandb[f"client_vote/{self.client_id}/confidence"] = vote_conf_mean
 
         # 写入 CSV (保持原有逻辑)
         try:
@@ -1131,6 +1153,28 @@ class Client:
     
 
     
+    def get_disambiguation_metrics(self):
+        true_labels = self._get_all_targets()
+        predicted_probs = torch.as_tensor(self.q, device=self.device)
+        predicted_labels = torch.argmax(predicted_probs, dim=1)
+        num_classes = predicted_probs.size(1)
+
+        if true_labels.device != predicted_labels.device:
+            true_labels = true_labels.to(predicted_labels.device)
+
+        conf = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=predicted_labels.device)
+        flat_indices = true_labels * num_classes + predicted_labels
+        conf.view(-1).index_add_(
+            0,
+            flat_indices,
+            torch.ones_like(flat_indices, dtype=torch.int64),
+        )
+        conf_np = conf.cpu().numpy()
+        metrics = common.get_metrics(conf_np)
+        metrics["balanced_acc"] = metrics["recall_mean"]
+        metrics["confusion_matrix"] = conf_np
+        return metrics
+
     def calculate_class_wise_accuracy(self) -> Tuple[List[float], float]:
         """Calculates the balanced (macro-average) accuracy for disambiguation tasks.
 
@@ -1144,42 +1188,11 @@ class Client:
                 - balanced_acc (float): The mean of class_accuracies. 
                 Returns 0.0 if no valid classes are found.
         """
-        # 1. Descriptive Variable Names
-        true_labels = self._get_all_targets()
-        # Assuming self.q is the probability distribution or logits
-        predicted_probs = torch.as_tensor(self.q, device=self.device)
-        
-        # 2. Logic Optimization: Use Tensor Operations
-        predicted_labels = torch.argmax(predicted_probs, dim=1)
-        num_classes = predicted_probs.size(1)
-
-        class_accuracies: List[float] = []
-
-        # 3. Defensive Programming: Explicit device handling if needed
-        # Ensure true_labels is on the same device for comparison
-        if true_labels.device != predicted_labels.device:
-            true_labels = true_labels.to(predicted_labels.device)
-
-        for class_idx in range(num_classes):
-            # Create boolean mask
-            class_mask = (true_labels == class_idx)
-            
-            # Skip classes that don't appear in this batch/dataset
-            if class_mask.sum() == 0:
-                continue
-
-            # Calculate accuracy for this specific class
-            # (Correct Predictions for Class C) / (Total Samples of Class C)
-            correct_preds = (predicted_labels[class_mask] == true_labels[class_mask])
-            accuracy = correct_preds.float().mean().item()
-            
-            class_accuracies.append(accuracy)
-
-        # 4. Robust Return: Handle Edge Case (Empty List)
+        metrics = self.get_disambiguation_metrics()
+        class_accuracies = metrics["recall_class"].tolist()
         if not class_accuracies:
             return [], 0.0
-
-        return class_accuracies, float(np.mean(class_accuracies))    
+        return class_accuracies, float(metrics["balanced_acc"])
 
     def get_acc_matrix(self, test_loader):
         self.local_model.eval()
@@ -1596,4 +1609,3 @@ class Client:
 
         return loss
     
-

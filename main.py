@@ -51,6 +51,10 @@ if __name__ == "__main__":
         loss_kind += "_proto"
     if config.fedsa == True:
         loss_kind += "_fedsa"
+
+    vote_kind = "novote"
+    if config.use_vote_pseudo:
+        vote_kind = f"vote{config.vote_num_models}"
     
          
     with wandb.init(
@@ -60,7 +64,7 @@ if __name__ == "__main__":
         name=(
             f'fedpll_noise:{config.noise_level}_m:{config.model_name.lower()}_' 
             f'd:{config.dataset}_{data_partition}_lr:{config.lr:.3f}_' 
-            f'optim:{config.optimizer}_{loss_kind}_findsgd'
+            f'optim:{config.optimizer}_{loss_kind}_{vote_kind}_findsgd'
         ),
         group='fedpll',
         allow_val_change=True,

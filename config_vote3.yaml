@@ -1,0 +1,31 @@
+seed: 42
+local_epochs: 10
+batch_size: 128
+optimizer: adam
+lr: 0.001
+momentum: 0.5
+model_name: resnet18
+dataset: SVHN
+noise_level: 0.3
+rounds: 200
+num_classes: 10
+num_clients: 10
+ratio: 1
+partition: non_iid
+p: 0.7
+alpha_dir: 0.5
+mixup_alpha: 0.2
+lc: true
+mix: false
+ga: false
+uniform: false
+proto: false
+
+upmodel: true
+device: cuda:0
+warmup: 30
+mask_mode: entropy
+
+use_vote_pseudo: true
+vote_num_models: 3
+vote_restrict_to_candidates: true

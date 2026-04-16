@@ -3,6 +3,7 @@
 
 
 import wandb
+import csv
 from client import Client
 from typing import List, Dict, Optional
 import model
@@ -50,6 +51,8 @@ class Server:
     
         # 配置本地测试集
         self.client_test_datasets = None
+        self.metrics_dir = os.path.join("csv_logs", f"{self.config.exp_id}_{self.config.exp_name}")
+        self.round_metrics_path = os.path.join(self.metrics_dir, "round_metrics.csv")
 
     def _get_classifier_input_dim(self) -> int:
         model_ref = self.global_model
@@ -130,6 +133,24 @@ class Server:
 
 
     def pre(self):
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        with open(self.round_metrics_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "round",
+                "server_test_acc",
+                "server_test_balanced_acc",
+                "server_test_macro_f1",
+                "global_disamb_acc",
+                "global_disamb_balanced_acc",
+                "global_disamb_macro_f1",
+                "client_disamb_std",
+                "client_test_acc_mean",
+                "client_test_acc_std",
+                "client_vote_pseudo_acc_mean",
+                "client_vote_confidence_mean",
+                "selected_clients",
+            ])
 
 
         self.global_model = model.get_model(self.config.model_name).to(self.device)
@@ -279,8 +300,13 @@ class Server:
             # 3. 测试与评估
             
             test_acc = self.eval(test_loader=test_loader)
+            server_metrics = common.get_metrics(self.get_acc_matrix(test_loader=test_loader))
             wandb.log({
                 "sevrer_test/acc": test_acc,
+                "server_test/balanced_acc": server_metrics["recall_mean"],
+                "server_test/macro_f1": server_metrics["f1"],
+                "server_test/precision_mean": server_metrics["precision_mean"],
+                "server_test/recall_mean": server_metrics["recall_mean"],
                 "server/covered_classes": len(self.global_prototypes),
                 "server/global_anchor_margin": global_anchor_margin
             }, step=r)
@@ -293,23 +319,73 @@ class Server:
                 logger.info(f"Client {client.client_id}: norm entropy = {client.norm_entropy:.4f}")
 
             all_client_accs = []
+            all_client_disamb_metrics = []
             for client in self.clients:
-                class_accs, mean_acc = client.calculate_class_wise_accuracy()
+                disamb_metrics = client.get_disambiguation_metrics()
+                _, mean_acc = client.calculate_class_wise_accuracy()
                 all_client_accs.append(mean_acc)
+                all_client_disamb_metrics.append(disamb_metrics)
 
                 # 3. 详细日志 (Verbose Logging)
                 # 记录每个 Client 的表现，方便排查掉队的节点 (Stragglers)
-                logger.info(f"Client {client.client_id}: Balanced Acc = {mean_acc:.4f}")
+                logger.info(
+                    f"Client {client.client_id}: Disamb Acc = {disamb_metrics['accuracy']:.4f}, "
+                    f"Balanced Acc = {disamb_metrics['balanced_acc']:.4f}, "
+                    f"Macro-F1 = {disamb_metrics['f1']:.4f}"
+                )
             global_avg_acc = np.mean(all_client_accs)
             logger.info(f"Round {r} Global Avg Disambiguation Acc: {global_avg_acc:.4f}")
 
             #每轮都测试一次泛化能力
+            client_test_accs = []
             if r >= 0:
                 for client in self.clients:
                     client_test_acc = client.test(test_loader=clients_test_loaders[client.client_id], 
                                 epoch = r,
                                 )
+                    client_test_accs.append(client_test_acc)
                     print(f'*****client: {client.client_id} test acc {client_test_acc}')
+
+            vote_metric_clients = [client.last_train_metrics for client in selected_clients if client.last_train_metrics]
+            vote_pseudo_accs = [m["vote_pseudo_acc"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_confidences = [m["vote_confidence"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            global_disamb_acc = float(np.mean([m["accuracy"] for m in all_client_disamb_metrics]))
+            global_disamb_balanced_acc = float(np.mean([m["balanced_acc"] for m in all_client_disamb_metrics]))
+            global_disamb_macro_f1 = float(np.mean([m["f1"] for m in all_client_disamb_metrics]))
+            client_disamb_std = float(np.std([m["balanced_acc"] for m in all_client_disamb_metrics]))
+            client_test_acc_mean = float(np.mean(client_test_accs)) if client_test_accs else 0.0
+            client_test_acc_std = float(np.std(client_test_accs)) if client_test_accs else 0.0
+            client_vote_pseudo_acc_mean = float(np.mean(vote_pseudo_accs)) if vote_pseudo_accs else 0.0
+            client_vote_confidence_mean = float(np.mean(vote_confidences)) if vote_confidences else 0.0
+
+            wandb.log({
+                "disamb/global_acc": global_disamb_acc,
+                "disamb/global_balanced_acc": global_disamb_balanced_acc,
+                "disamb/global_macro_f1": global_disamb_macro_f1,
+                "disamb/client_balanced_acc_std": client_disamb_std,
+                "client_test/mean_acc": client_test_acc_mean,
+                "client_test/std_acc": client_test_acc_std,
+                "vote/mean_pseudo_acc": client_vote_pseudo_acc_mean,
+                "vote/mean_confidence": client_vote_confidence_mean,
+            }, step=r)
+
+            with open(self.round_metrics_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    r,
+                    test_acc,
+                    server_metrics["recall_mean"],
+                    server_metrics["f1"],
+                    global_disamb_acc,
+                    global_disamb_balanced_acc,
+                    global_disamb_macro_f1,
+                    client_disamb_std,
+                    client_test_acc_mean,
+                    client_test_acc_std,
+                    client_vote_pseudo_acc_mean,
+                    client_vote_confidence_mean,
+                    "|".join(str(client.client_id) for client in selected_clients),
+                ])
                 
             # 每100轮画一次热力图 (原有逻辑)
             if (r + 1) % 100 == 0:
