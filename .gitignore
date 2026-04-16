@@ -9,11 +9,8 @@ client_*_q_log.csv
 client_*_sample_*.png
 data/
 temp/
-packages.microsoft.gpg
-raw_parsing.py
-svhn_visual_similarity.npy
-test.ipynb
-test2.ipynb
+local/
+notebooks/
 tests/
 
 # Python cache
