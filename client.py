@@ -36,6 +36,9 @@ probs_matrix = []
 
 
 class Client:
+    HIGH_CONFIDENCE_THRESHOLD = 0.8
+    LOW_CONFIDENCE_THRESHOLD = 0.5
+
     def __init__(self,
                  local_model, 
                  train_dataset, 
@@ -62,7 +65,6 @@ class Client:
                                                         device='cuda',
                                                         noise_rate=self.config.noise_level,
                                                         num_classes=10)
-            print(id_all_candidates[:3])
         
         candidate_labels = []
 
@@ -94,13 +96,19 @@ class Client:
 
         # [!! 新 CSV INIT !!]
         self.q_log_filename = os.path.join(self.log_dir, f'client_{self.client_id}_q_log.csv')
+        self.vote_bad_case_filename = os.path.join(self.log_dir, f"client_{self.client_id}_vote_bad_cases.csv")
         self.csv_header = "Round,Epoch,Index,TrueLabel,Candidates,QVector\n"
         self.last_train_metrics = {}
         try:
             # 'w' 模式会覆盖旧实验的日志，这通常是期望的行为
             with open(self.q_log_filename, 'w') as f: 
                 f.write(self.csv_header)
-            print(f"Client {self.client_id} logging Q-vectors to {self.q_log_filename}")
+            with open(self.vote_bad_case_filename, "w") as f:
+                f.write(
+                    "Round,Epoch,Index,TrueLabel,Candidates,CandidateSize,"
+                    "QPseudoLabel,VotePseudoLabel,VoteConfidence,ModelPred,"
+                    "IsVoteCorrect,IsModelCorrect,CaseType\n"
+                )
         except IOError as e:
             print(f"Warning: Could not write CSV header to {self.q_log_filename}: {e}")
         # [!! CSV INIT 结束 !!]
@@ -187,16 +195,11 @@ class Client:
                 
 
 
-        print(f'client id:{client_id} 候选标签集和分布\n', counts)
         if self.config.uniform == True:
-            print(f'生成实例无关场景候选标签集和')
             self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=candidate_labels, rho=self.config.noise_level)
-            print(f'噪声等级为: {self.check_noise()}')
             
         else:
-            print(f'生成实例依赖场景候选标签集和')
             self.train_plldataset = PLLDataset(self.train_dataset, num_classes=self.config.num_classes, candidate_labels=id_all_candidates, rho=self.config.noise_level)
-            print(f'噪声等级为: {self.check_noise()}')
             
 
         
@@ -211,11 +214,7 @@ class Client:
             q.append(p)
         q = torch.stack(q).to(device=self.device)
         self.q = q
-
-        # [!! 修改后的打印 !!] 
-        print(f"Client {self.client_id} tracking {len(self.debug_indices)} fixed indices (up to {num_per_class_to_track} per class):")
-        print(f"  {self.debug_indices}")
-        # [!! 修改结束 !!]
+        self.candidate_stats = self._compute_candidate_stats()
 
         self.local_model = copy.deepcopy(local_model).to(self.device)
         self.vote_model = copy.deepcopy(local_model).to(self.device)
@@ -236,6 +235,77 @@ class Client:
         self.optimizer = None
         self.epochs = self.config.local_epochs
         self.global_model = None
+
+    def _compute_candidate_stats(self) -> Dict[str, float]:
+        candidate_labels = self.train_plldataset.candidate_labels
+        if isinstance(candidate_labels, list):
+            candidate_labels = torch.stack(candidate_labels)
+        candidate_sizes = candidate_labels.sum(dim=1).float().cpu().numpy()
+        if candidate_sizes.size == 0:
+            return {
+                "candidate_size_mean": 0.0,
+                "candidate_size_std": 0.0,
+                "candidate_size_p50": 0.0,
+                "candidate_size_p90": 0.0,
+                "candidate_ambiguity_rate": 0.0,
+            }
+
+        return {
+            "candidate_size_mean": float(candidate_sizes.mean()),
+            "candidate_size_std": float(candidate_sizes.std()),
+            "candidate_size_p50": float(np.percentile(candidate_sizes, 50)),
+            "candidate_size_p90": float(np.percentile(candidate_sizes, 90)),
+            "candidate_ambiguity_rate": float((candidate_sizes > 1).mean()),
+        }
+
+    def _append_vote_bad_cases(
+        self,
+        round_id: int,
+        epoch: int,
+        idxs: torch.Tensor,
+        target: torch.Tensor,
+        candidates: torch.Tensor,
+        q_pseudo_labels: torch.Tensor,
+        vote_pseudo_labels: torch.Tensor,
+        vote_confidences: torch.Tensor,
+        model_preds: torch.Tensor,
+    ) -> None:
+        hard_vote_labels = vote_pseudo_labels.argmax(dim=1)
+        candidate_sizes = candidates.sum(dim=1)
+        high_conf_wrong = (
+            (vote_confidences >= self.HIGH_CONFIDENCE_THRESHOLD)
+            & (hard_vote_labels != target)
+        )
+        low_conf_correct = (
+            (vote_confidences <= self.LOW_CONFIDENCE_THRESHOLD)
+            & (hard_vote_labels == target)
+        )
+        flagged = high_conf_wrong | low_conf_correct
+        if not flagged.any():
+            return
+
+        try:
+            with open(self.vote_bad_case_filename, "a") as f:
+                flagged_indices = torch.where(flagged)[0].tolist()
+                for batch_pos in flagged_indices:
+                    candidate_vector = candidates[batch_pos]
+                    candidate_ids = torch.where(candidate_vector == 1)[0].detach().cpu().tolist()
+                    case_type = (
+                        "high_conf_wrong"
+                        if bool(high_conf_wrong[batch_pos].item())
+                        else "low_conf_correct"
+                    )
+                    f.write(
+                        f"{round_id},{epoch},{int(idxs[batch_pos])},{int(target[batch_pos])},"
+                        f"\"{candidate_ids}\",{int(candidate_sizes[batch_pos])},"
+                        f"{int(q_pseudo_labels[batch_pos])},{int(hard_vote_labels[batch_pos])},"
+                        f"{float(vote_confidences[batch_pos]):.6f},{int(model_preds[batch_pos])},"
+                        f"{int((hard_vote_labels[batch_pos] == target[batch_pos]).item())},"
+                        f"{int((model_preds[batch_pos] == target[batch_pos]).item())},"
+                        f"{case_type}\n"
+                    )
+        except IOError as e:
+            print(f"Error writing vote bad cases for client {self.client_id}: {e}")
 
     def check_noise(self) -> float:
         """
@@ -292,11 +362,6 @@ class Client:
             f" >> Estimated Rho      : {estimated_rho:.4f} (Target: {target_rho})",
             f" >> Min Candidate Size : {min_size:.1f}  (MUST BE >= 2.0)"
         ]
-
-        # 统一打印和日志记录
-        for line in msg_lines:
-            print(line)
-            logging.info(line.strip())
 
         # 5. 熔断保护 (Circuit Breaker)
         if min_size < 2.0:
@@ -675,7 +740,6 @@ class Client:
         # 更新本地阈值
         current_batch_mean = norm_entropy.mean().detach()
         self.norm_entropy = alpha * self.norm_entropy + (1 - alpha) * current_batch_mean
-        print(f'熵值：{self.norm_entropy}')
         # 2. 阈值筛选：熵大于 0.4 视为“困惑/困难样本”
         
         
@@ -849,31 +913,8 @@ class Client:
             self.config = None
             self.update_config(new_config)
 
-        print(f"roud {roud} training... (Client {self.client_id})")
-
-        if self.config.optimizer.lower() == "adam":
-            print(f'Client {self.client_id} using Adam')
-            logging.info(f'Client {self.client_id} using Adam')
-        else:
-            logging.info(f'Client {self.client_id} using SGD')
-            print(f'Client {self.client_id} using SGD')
-
-        if self.config.proto:
-            logging.info(f'Client {self.client_id} [启用] 原型引导模块 (Prototype Guidance)')
-            print(f'Client {self.client_id} [启用] 原型引导模块 (Prototype Guidance)')
-        if self.config.mix:
-            logging.info(f'Client {self.client_id} [启用] 数据混合增强模块 (Mixup)')
-            print(f'Client {self.client_id} [启用] 数据混合增强模块 (Mixup)')
-        if self.config.ga:
-            logging.info(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
-            print(f'Client {self.client_id} [启用] 梯度对齐模块 (Gradient Alignment)')
-        if self.config.fedsa:
-            logging.info(f'Client {self.client_id} [启用] FedSA Semantic Anchors')
-            print(f'Client {self.client_id} [启用] FedSA Semantic Anchors')
-
         # 1. 加载全局模型参数
         if self.config.upmodel == True:
-            print(f'客户端 {self.client_id}启用共享模型开关')
             self.local_model.load_state_dict(global_model_state_dict)
 
 
@@ -907,6 +948,11 @@ class Client:
         total_vote_confidence = 0.0
         total_vote_correct = 0
         total_vote_samples = 0
+        vote_confidence_values = []
+        high_conf_error_count = 0
+        high_conf_sample_count = 0
+        low_conf_correct_count = 0
+        low_conf_sample_count = 0
 
         # 初始化用于 CSV/Wandb 记录的列表
         start_epoch_data = []
@@ -916,11 +962,6 @@ class Client:
         # print(f"client{self.client_id} using lc_loss")
         # if self.config.mix: print(f"client{self.client_id} using mix_loss")
         # if self.config.ga: print(f"client{self.client_id} using lga")
-        if global_prototypes is not None:
-            print(f"client{self.client_id} using prototype_guidance")
-        if semantic_anchors is not None:
-            print(f"client{self.client_id} using semantic_anchors")
-        
         for epoch in range(self.epochs):
             
             total_samples = 0
@@ -938,6 +979,7 @@ class Client:
                 
                 # Forward
                 output = self.local_model(data)
+                model_preds = output.argmax(dim=1)
 
                 vote_pseudo_labels, _ = self._majority_vote_pseudo_labels(
                     data=data,
@@ -950,6 +992,25 @@ class Client:
                     total_vote_confidence += vote_confidences.sum().item()
                     total_vote_correct += (hard_vote_labels == target).sum().item()
                     total_vote_samples += target.size(0)
+                    vote_confidence_values.extend(vote_confidences.detach().cpu().tolist())
+                    high_conf_mask = vote_confidences >= self.HIGH_CONFIDENCE_THRESHOLD
+                    low_conf_mask = vote_confidences <= self.LOW_CONFIDENCE_THRESHOLD
+                    high_conf_sample_count += int(high_conf_mask.sum().item())
+                    low_conf_sample_count += int(low_conf_mask.sum().item())
+                    high_conf_error_count += int(((hard_vote_labels != target) & high_conf_mask).sum().item())
+                    low_conf_correct_count += int(((hard_vote_labels == target) & low_conf_mask).sum().item())
+                    q_pseudo_labels, _ = self._infer_pseudo_labels(idxs, candidates)
+                    self._append_vote_bad_cases(
+                        round_id=roud,
+                        epoch=epoch,
+                        idxs=idxs,
+                        target=target,
+                        candidates=candidates,
+                        q_pseudo_labels=q_pseudo_labels,
+                        vote_pseudo_labels=vote_pseudo_labels,
+                        vote_confidences=vote_confidences,
+                        model_preds=model_preds,
+                    )
                 
                 # --- Loss 1: 基础 PLL Loss ---
                 if vote_pseudo_labels is not None:
@@ -1026,9 +1087,7 @@ class Client:
             # 捕获第一个和最后一个epoch的数据用于 Debug
             if epoch == 0 or epoch == self.epochs - 1:
                 current_data_list = start_epoch_data if epoch == 0 else end_epoch_data
-                
-                print(f"--- Client {self.client_id} Epoch {epoch} Q-Vector Inspection ---")
-                
+
                 for idx in self.debug_indices:
                     if idx >= len(self.train_dataset): continue 
                     
@@ -1047,20 +1106,8 @@ class Client:
                         q_formatted
                     ])
 
-                    # 控制台打印
-                    print(f"  [Tracked Index {idx}]:")
-                    print(f"    True Label:   {true_label}")
-                    print(f"    Candidates:   {candidate_indices}")
-                    print(f"    Q-Vector:     [{q_formatted}]")
-                
-                print("--------------------------------------------------\n")
-
             train_loss = train_loss / total_samples
             train_acc = train_acc / total_samples
-            print(f"--- [Client {self.client_id}] Training Epoch {epoch}/{self.epochs} Train Acc {train_acc} ---")
-            # 这里的 Log 稍微改一下，显示 Proto Loss 是否生效
-            # print(f"----> client: {self.client_id} | Roud: {roud:3d} | Epoch: {epoch:3d} | "
-            #     f"Loss: {train_loss:.4f} | Acc: {train_acc:.4f}\n")
 
             avg_train_acc = avg_train_acc + train_acc
             avg_train_loss = avg_train_loss + train_loss 
@@ -1073,21 +1120,49 @@ class Client:
         avg_train_loss = avg_train_loss * 1.0 / self.epochs
         vote_pseudo_acc = total_vote_correct / total_vote_samples if total_vote_samples > 0 else 0.0
         vote_conf_mean = total_vote_confidence / total_vote_samples if total_vote_samples > 0 else 0.0
+        vote_conf_p10 = float(np.percentile(vote_confidence_values, 10)) if vote_confidence_values else 0.0
+        vote_conf_p50 = float(np.percentile(vote_confidence_values, 50)) if vote_confidence_values else 0.0
+        vote_conf_p90 = float(np.percentile(vote_confidence_values, 90)) if vote_confidence_values else 0.0
+        high_conf_error_rate = (
+            high_conf_error_count / high_conf_sample_count if high_conf_sample_count > 0 else 0.0
+        )
+        low_conf_correct_rate = (
+            low_conf_correct_count / low_conf_sample_count if low_conf_sample_count > 0 else 0.0
+        )
+        vote_sample_coverage = total_vote_samples / len(self.train_dataset) if len(self.train_dataset) > 0 else 0.0
         self.last_train_metrics = {
             "train_acc": avg_train_acc,
             "train_loss": avg_train_loss,
             "vote_pseudo_acc": vote_pseudo_acc,
             "vote_confidence": vote_conf_mean,
+            "vote_confidence_p10": vote_conf_p10,
+            "vote_confidence_p50": vote_conf_p50,
+            "vote_confidence_p90": vote_conf_p90,
+            "vote_high_conf_error_rate": high_conf_error_rate,
+            "vote_low_conf_correct_rate": low_conf_correct_rate,
+            "vote_high_conf_threshold": self.HIGH_CONFIDENCE_THRESHOLD,
+            "vote_low_conf_threshold": self.LOW_CONFIDENCE_THRESHOLD,
             "vote_samples": total_vote_samples,
+            "vote_sample_coverage": vote_sample_coverage,
+            **self.candidate_stats,
         }
 
         logs_to_wandb = {
             f"client_train/{self.client_id}/acc": avg_train_acc,
             f"client_train/{self.client_id}/loss": avg_train_loss,
+            f"client_candidate/{self.client_id}/size_mean": self.candidate_stats["candidate_size_mean"],
+            f"client_candidate/{self.client_id}/size_p90": self.candidate_stats["candidate_size_p90"],
+            f"client_candidate/{self.client_id}/ambiguity_rate": self.candidate_stats["candidate_ambiguity_rate"],
         }
         if total_vote_samples > 0:
-            logs_to_wandb[f"client_vote/{self.client_id}/pseudo_acc"] = vote_pseudo_acc
-            logs_to_wandb[f"client_vote/{self.client_id}/confidence"] = vote_conf_mean
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/pseudo_acc"] = vote_pseudo_acc
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/confidence"] = vote_conf_mean
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/confidence_p10"] = vote_conf_p10
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/confidence_p50"] = vote_conf_p50
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/confidence_p90"] = vote_conf_p90
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/high_conf_error_rate"] = high_conf_error_rate
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/low_conf_correct_rate"] = low_conf_correct_rate
+            logs_to_wandb[f"selected_client_vote/{self.client_id}/coverage"] = vote_sample_coverage
 
         # 写入 CSV (保持原有逻辑)
         try:
@@ -1247,11 +1322,8 @@ class Client:
         test_acc = test_acc / len(test_loader.dataset)
         # test_loss = test_loss / len(test_loader.dataset)
 
-        wandb.log({f"client_test/{self.client_id}/acc":test_acc}, step=epoch)
+        wandb.log({f"client_personalized_test/{self.client_id}/acc": test_acc}, step=epoch)
         # wandb.log({"test/loss":test_loss})
-        print(f"client:{self.client_id}: Epoch: {epoch:3d} | "
-            #   f"Test Loss: {test_loss:.6f} | "
-            f"Test Acc: {test_acc:.4f}\n")
         return test_acc
     def pll_loss_vectorized_soft_preds(self, output, idxs, candidates,  miu=0.99):
         q = self.q

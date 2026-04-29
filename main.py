@@ -17,6 +17,35 @@ import json
 import argparse
 
 
+def build_experiment_name(config: ExperimentConfig) -> str:
+    if config.partition.lower() == "non_iid":
+        partition_kind = f"noniid_p{config.p}_alpha{config.alpha_dir}"
+    else:
+        partition_kind = "iid"
+
+    loss_parts = []
+    if config.lc:
+        loss_parts.append("lc")
+    if config.mix:
+        loss_parts.append("mix")
+    if config.ga:
+        loss_parts.append("ga")
+    if config.proto:
+        loss_parts.append("proto")
+    if config.fedsa:
+        loss_parts.append("fedsa")
+    loss_kind = "-".join(loss_parts) if loss_parts else "base"
+
+    vote_kind = f"vote{config.vote_num_models}" if config.use_vote_pseudo else "vote0"
+
+    return (
+        f"fedpll_{config.dataset.lower()}_{config.model_name.lower()}_"
+        f"{vote_kind}_s{config.seed}_r{config.rounds}_le{config.local_epochs}_"
+        f"noise{config.noise_level}_{partition_kind}_"
+        f"{config.optimizer}_lr{config.lr:g}_{loss_kind}"
+    )
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="联邦偏标记学习实验管理")
@@ -34,39 +63,21 @@ if __name__ == "__main__":
         print(f"❌ 配置加载失败: {e}")
         exit(1)
     
-    data_partition = ""
-    if config.partition.lower() == "non_iid":
-        data_partition = f'noniid_class_p:{config.p}_alpha_dir:{config.alpha_dir}'
-    else:
-        data_partition = f'iid'
-
-    loss_kind = ""
-    if config.lc == True:
-        loss_kind += "lc"
-    if config.mix == True:
-        loss_kind += "_mix"
-    if config.ga == True:
-        loss_kind += "_ga"
-    if config.proto == True:
-        loss_kind += "_proto"
-    if config.fedsa == True:
-        loss_kind += "_fedsa"
-
-    vote_kind = "novote"
-    if config.use_vote_pseudo:
-        vote_kind = f"vote{config.vote_num_models}"
+    experiment_name = build_experiment_name(config)
     
          
     with wandb.init(
         project='test-fl', 
         entity='whitewall_9-jinan-university', 
         config=config.model_dump(), # 传字典给 wandb
-        name=(
-            f'fedpll_noise:{config.noise_level}_m:{config.model_name.lower()}_' 
-            f'd:{config.dataset}_{data_partition}_lr:{config.lr:.3f}_' 
-            f'optim:{config.optimizer}_{loss_kind}_{vote_kind}_findsgd'
-        ),
-        group='fedpll',
+        name=experiment_name,
+        group=f"vote_{config.dataset.lower()}_{config.model_name.lower()}_noise{config.noise_level}",
+        tags=[
+            f"seed:{config.seed}",
+            f"vote:{config.vote_num_models if config.use_vote_pseudo else 0}",
+            f"rounds:{config.rounds}",
+            f"partition:{config.partition.lower()}",
+        ],
         allow_val_change=True,
     ) as run:
         
@@ -86,10 +97,21 @@ if __name__ == "__main__":
         os.makedirs(save_dir, exist_ok=True)
         logger = setup_logger(save_path=save_dir, log_file_name=f"{config.exp_id}.log")
         
-        # 4. [Print Config] 打印漂亮的配置信息 (你的需求)
-        config_dict = config.model_dump()
-        config_str = json.dumps(config_dict, indent=4, ensure_ascii=False)
-        logger.info(f"\n{'='*20} Experiment Configuration {'='*20}\n{config_str}\n{'='*65}")
+        # 4. [Print Config] 打印简洁实验摘要；完整配置已在 W&B config 中保存。
+        logger.info(f"Experiment | name={config.exp_name}")
+        logger.info(
+            f"Experiment | dataset={config.dataset}, model={config.model_name}, "
+            f"seed={config.seed}, rounds={config.rounds}, clients={config.num_clients}"
+        )
+        logger.info(
+            f"Experiment | partition={config.partition}, p={config.p}, "
+            f"alpha={config.alpha_dir}, optimizer={config.optimizer}, lr={config.lr}"
+        )
+        logger.info(
+            f"Experiment | vote={config.vote_num_models if config.use_vote_pseudo else 0}, "
+            f"losses=lc:{config.lc},mix:{config.mix},ga:{config.ga},"
+            f"proto:{config.proto},fedsa:{config.fedsa}"
+        )
         
         # 5. [Seed] 固定种子
         seed_everything(config.seed)

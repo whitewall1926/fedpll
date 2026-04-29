@@ -53,6 +53,12 @@ class Server:
         self.client_test_datasets = None
         self.metrics_dir = os.path.join("csv_logs", f"{self.config.exp_id}_{self.config.exp_name}")
         self.round_metrics_path = os.path.join(self.metrics_dir, "round_metrics.csv")
+        self.per_client_round_metrics_path = os.path.join(self.metrics_dir, "per_client_round_metrics.csv")
+        self.confusion_matrix_dir = os.path.join(self.metrics_dir, "confusion_matrices")
+
+    @staticmethod
+    def _safe_mean(values: List[float]) -> float:
+        return float(np.mean(values)) if values else 0.0
 
     def _get_classifier_input_dim(self) -> int:
         model_ref = self.global_model
@@ -87,6 +93,170 @@ class Server:
         if valid_mask.sum() == 0:
             return 0.0
         return float(pairwise_dist[valid_mask].mean().item())
+
+    def _write_confusion_matrix_csv(self, path: str, matrix: np.ndarray):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        matrix = np.asarray(matrix, dtype=int)
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["true_label\\pred_label"] + [f"pred_{i}" for i in range(matrix.shape[1])])
+            for true_label, row in enumerate(matrix):
+                writer.writerow([f"true_{true_label}"] + row.tolist())
+
+    def _format_worst_confusion_classes(self, matrix: np.ndarray, metrics: Dict, top_k: int = 3) -> str:
+        matrix = np.asarray(matrix)
+        recalls = np.asarray(metrics["recall_class"])
+        supports = matrix.sum(axis=1)
+        valid_classes = np.where(supports > 0)[0]
+        if len(valid_classes) == 0:
+            return "no supported classes"
+
+        worst_classes = sorted(valid_classes, key=lambda class_id: recalls[class_id])[:top_k]
+        parts = []
+        for class_id in worst_classes:
+            row = matrix[class_id].copy()
+            correct = row[class_id]
+            row[class_id] = -1
+            confused_pred = int(np.argmax(row)) if row.size > 0 and row.max() > 0 else None
+            if confused_pred is None:
+                parts.append(
+                    f"class {class_id}: recall={recalls[class_id]:.4f}, "
+                    f"support={int(supports[class_id])}, correct={int(correct)}"
+                )
+            else:
+                parts.append(
+                    f"class {class_id}: recall={recalls[class_id]:.4f}, "
+                    f"support={int(supports[class_id])}, correct={int(correct)}, "
+                    f"most_confused_as={confused_pred} ({int(matrix[class_id, confused_pred])})"
+                )
+        return "; ".join(parts)
+
+    def _format_worst_clients(self, client_metrics: List[Dict], top_k: int = 3) -> List[str]:
+        if not client_metrics:
+            return ["no client metrics"]
+        worst_items = sorted(
+            enumerate(client_metrics),
+            key=lambda item: item[1]["accuracy"],
+        )[:top_k]
+        return [
+            f"client {client_id}: acc={metrics['accuracy']:.4f}, "
+            f"macro_recall={metrics['recall_mean']:.4f}, macro_f1={metrics['f1']:.4f}"
+            for client_id, metrics in worst_items
+        ]
+
+    def _format_client_metric_lines(self, disamb_metrics: List[Dict], test_metrics: List[Dict]) -> List[str]:
+        if not disamb_metrics or not test_metrics:
+            return ["no client metrics"]
+        lines = []
+        for client_id, (disamb, test) in enumerate(zip(disamb_metrics, test_metrics)):
+            lines.append(
+                f"client {client_id}: acc={test['accuracy']:.4f}, "
+                f"macro_recall={test['recall_mean']:.4f}, "
+                f"macro_f1={test['f1']:.4f}, "
+                f"q_acc={disamb['accuracy']:.4f}, "
+                f"q_macro_f1={disamb['f1']:.4f}"
+            )
+        return lines
+
+    def _log_round_interpretation(
+        self,
+        round_id: int,
+        server_acc: float,
+        mean_client_personalized_test_acc: float,
+        min_client_personalized_test_acc: float,
+        p10_client_personalized_test_acc: float,
+        mean_client_disamb_q_macro_f1: float,
+        mean_selected_client_vote_pseudo_acc: float,
+        mean_selected_client_vote_confidence: float,
+        mean_selected_client_vote_confidence_p90: float,
+        mean_selected_client_vote_high_conf_error_rate: float,
+        mean_selected_client_candidate_ambiguity_rate: float,
+    ):
+        gap = mean_client_personalized_test_acc - server_acc
+        gap_text = (
+            f"客户端个性化均值比 server 高 {gap:.4f}"
+            if gap >= 0
+            else f"客户端个性化均值比 server 低 {-gap:.4f}"
+        )
+        vote_text = (
+            "本轮没有 vote 伪标签样本"
+            if mean_selected_client_vote_pseudo_acc == 0 and mean_selected_client_vote_confidence == 0
+            else f"vote 伪标签准确率/置信度为 {mean_selected_client_vote_pseudo_acc:.4f}/{mean_selected_client_vote_confidence:.4f}"
+        )
+        self.logger.info(f"Round {round_id} 解读 | {gap_text}。")
+        self.logger.info(
+            f"Round {round_id} 解读 | 弱客户端 min/p10="
+            f"{min_client_personalized_test_acc:.4f}/{p10_client_personalized_test_acc:.4f}；"
+            f"q 消歧 macro_f1={mean_client_disamb_q_macro_f1:.4f}。"
+        )
+        self.logger.info(f"Round {round_id} 解读 | {vote_text}。")
+        self.logger.info(
+            f"Round {round_id} 解读 | vote_conf_p90={mean_selected_client_vote_confidence_p90:.4f}；"
+            f"高置信错误率={mean_selected_client_vote_high_conf_error_rate:.4f}；"
+            f"候选集歧义率={mean_selected_client_candidate_ambiguity_rate:.4f}。"
+        )
+        self.logger.info(
+            f"Round {round_id} 查看错误 | 混淆矩阵 CSV 中每一行是真实类别，"
+            f"非对角线的大值表示该类经常被错分到对应预测类别。"
+        )
+
+    def _log_round_metric_summary(
+        self,
+        round_id: int,
+        server_metrics: Dict,
+        mean_client_disamb_q_acc: float,
+        mean_client_disamb_q_macro_recall: float,
+        mean_client_disamb_q_macro_precision: float,
+        mean_client_disamb_q_macro_f1: float,
+        std_client_disamb_q_macro_recall: float,
+        mean_client_personalized_test_acc: float,
+        std_client_personalized_test_acc: float,
+        min_client_personalized_test_acc: float,
+        p10_client_personalized_test_acc: float,
+        mean_selected_client_vote_pseudo_acc: float,
+        mean_selected_client_vote_confidence: float,
+        mean_selected_client_vote_confidence_p10: float,
+        mean_selected_client_vote_confidence_p50: float,
+        mean_selected_client_vote_confidence_p90: float,
+        mean_selected_client_vote_high_conf_error_rate: float,
+        mean_selected_client_vote_low_conf_correct_rate: float,
+        mean_selected_client_vote_sample_coverage: float,
+        mean_selected_client_candidate_size_mean: float,
+        mean_selected_client_candidate_size_p90: float,
+        mean_selected_client_candidate_ambiguity_rate: float,
+    ):
+        self.logger.info(
+            f"Round {round_id} Server | acc={server_metrics['accuracy']:.4f}, "
+            f"macro_recall={server_metrics['recall_mean']:.4f}, macro_f1={server_metrics['f1']:.4f}"
+        )
+        self.logger.info(
+            f"Round {round_id} Client Overall | "
+            f"acc_mean={mean_client_personalized_test_acc:.4f}, "
+            f"acc_std={std_client_personalized_test_acc:.4f}, "
+            f"acc_min={min_client_personalized_test_acc:.4f}, "
+            f"acc_p10={p10_client_personalized_test_acc:.4f}"
+        )
+        self.logger.info(
+            f"Round {round_id} Disamb Q | acc={mean_client_disamb_q_acc:.4f}, "
+            f"macro_recall={mean_client_disamb_q_macro_recall:.4f}, "
+            f"macro_precision={mean_client_disamb_q_macro_precision:.4f}, "
+            f"macro_f1={mean_client_disamb_q_macro_f1:.4f}, "
+            f"std_macro_recall={std_client_disamb_q_macro_recall:.4f}"
+        )
+        self.logger.info(
+            f"Round {round_id} Vote | pseudo_acc={mean_selected_client_vote_pseudo_acc:.4f}, "
+            f"confidence={mean_selected_client_vote_confidence:.4f}, "
+            f"conf_p10/p50/p90={mean_selected_client_vote_confidence_p10:.4f}/"
+            f"{mean_selected_client_vote_confidence_p50:.4f}/{mean_selected_client_vote_confidence_p90:.4f}, "
+            f"high_conf_err={mean_selected_client_vote_high_conf_error_rate:.4f}, "
+            f"low_conf_correct={mean_selected_client_vote_low_conf_correct_rate:.4f}, "
+            f"coverage={mean_selected_client_vote_sample_coverage:.4f}"
+        )
+        self.logger.info(
+            f"Round {round_id} Candidate | size_mean={mean_selected_client_candidate_size_mean:.4f}, "
+            f"size_p90={mean_selected_client_candidate_size_p90:.4f}, "
+            f"ambiguity_rate={mean_selected_client_candidate_ambiguity_rate:.4f}"
+        )
 
                     
 
@@ -134,22 +304,62 @@ class Server:
 
     def pre(self):
         os.makedirs(self.metrics_dir, exist_ok=True)
+        os.makedirs(self.confusion_matrix_dir, exist_ok=True)
         with open(self.round_metrics_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "round",
                 "server_test_acc",
-                "server_test_balanced_acc",
+                "server_test_macro_recall",
                 "server_test_macro_f1",
-                "global_disamb_acc",
-                "global_disamb_balanced_acc",
-                "global_disamb_macro_f1",
-                "client_disamb_std",
-                "client_test_acc_mean",
-                "client_test_acc_std",
-                "client_vote_pseudo_acc_mean",
-                "client_vote_confidence_mean",
+                "mean_client_disamb_q_acc",
+                "mean_client_disamb_q_macro_recall",
+                "mean_client_disamb_q_macro_precision",
+                "mean_client_disamb_q_macro_f1",
+                "std_client_disamb_q_macro_recall",
+                "mean_client_personalized_test_acc",
+                "std_client_personalized_test_acc",
+                "min_client_personalized_test_acc",
+                "p10_client_personalized_test_acc",
+                "mean_selected_client_vote_pseudo_acc",
+                "mean_selected_client_vote_confidence",
+                "mean_selected_client_vote_confidence_p10",
+                "mean_selected_client_vote_confidence_p50",
+                "mean_selected_client_vote_confidence_p90",
+                "mean_selected_client_vote_high_conf_error_rate",
+                "mean_selected_client_vote_low_conf_correct_rate",
+                "mean_selected_client_vote_sample_coverage",
+                "mean_selected_client_candidate_size_mean",
+                "mean_selected_client_candidate_size_p90",
+                "mean_selected_client_candidate_ambiguity_rate",
                 "selected_clients",
+            ])
+        with open(self.per_client_round_metrics_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "round",
+                "client_id",
+                "selected",
+                "client_disamb_q_acc",
+                "client_disamb_q_macro_recall",
+                "client_disamb_q_macro_precision",
+                "client_disamb_q_macro_f1",
+                "client_personalized_test_acc",
+                "client_personalized_test_macro_recall",
+                "client_personalized_test_macro_precision",
+                "client_personalized_test_macro_f1",
+                "client_vote_confidence_mean",
+                "client_vote_confidence_p10",
+                "client_vote_confidence_p50",
+                "client_vote_confidence_p90",
+                "client_vote_high_conf_error_rate",
+                "client_vote_low_conf_correct_rate",
+                "client_vote_sample_coverage",
+                "client_candidate_size_mean",
+                "client_candidate_size_std",
+                "client_candidate_size_p50",
+                "client_candidate_size_p90",
+                "client_candidate_ambiguity_rate",
             ])
 
 
@@ -166,15 +376,18 @@ class Server:
                                                      num_clients=self.config.num_clients,
                                                      p=self.config.p,
                                                      alpha_dir=self.config.alpha_dir)
-            
-            counts = compute_client_class_counts_from_subsets(client_datasets=client_train_dataset, num_classes=self.config.num_classes)
-            self.client_test_datasets = split_testset_by_distribution(global_test_dataset=self.test_dataset, phi_matrix=phi_matrix)
+            self.logger.info(
+                f"Data partition | non_iid p={self.config.p}, alpha={self.config.alpha_dir}, "
+                f"phi_shape={phi_matrix.shape}"
+            )
 
-            fig = plot_counts_heatmap_blue(counts=counts, normalize='none', figsize=(12, 6))
-            
-            wandb.log({"clients_class_distribution": wandb.Image(fig)}, commit=False)
+        counts = compute_client_class_counts_from_subsets(client_datasets=client_train_dataset, num_classes=self.config.num_classes)
+        self.client_test_datasets = split_testset_by_distribution(global_test_dataset=self.test_dataset, distribution_matrix=counts)
 
-            print("class distribution: \n",phi_matrix)
+        fig = plot_counts_heatmap_blue(counts=counts, normalize='none', figsize=(12, 6))
+        
+        wandb.log({"clients_class_distribution": wandb.Image(fig)}, commit=False)
+
         # perm = torch.randperm(len(self.train_dataset))
         # new_perms = np.array_split(perm.numpy(), self.config.num_clients)
         # client_train_dataset = [Subset(self.train_dataset, torch.tensor(p)) for p in new_perms]
@@ -224,10 +437,6 @@ class Server:
             clients_test_loaders.append(DataLoader(dataset=self.client_test_datasets[client.client_id],
                                                    batch_size=128,
                                                    shuffle=False))
-            common.print_dataset_distribution(
-                    self.client_test_datasets[client.client_id], 
-                    title=f"Client {client.client_id} Test Set"
-                )            
         # 记录已覆盖的类别数 (用于观察系统何时学会了所有类)
         covered_classes_history = []
 
@@ -237,8 +446,6 @@ class Server:
         acc = []
 
         for r in range(self.config.rounds):
-            print(f'current step: {wandb.run.step}, current round: {r}')
-
             state_dicts = list()
             
             # [FedODP] 用于收集本轮各 Client 贡献的原型
@@ -246,7 +453,7 @@ class Server:
 
             k = int(len(self.clients) * self.config.ratio)
             selected_clients = random.sample(self.clients, k)
-            print(f"number: {k}, selected clients: {[self.clients.index(client) for client in selected_clients]}")
+            self.logger.info(f"Round {r} Selected | clients={[client.client_id for client in selected_clients]}")
 
             vote_model_state_dicts = None
             if self.config.use_vote_pseudo:
@@ -295,79 +502,172 @@ class Server:
             # 2. [FedODP] 聚合原型 (更新全局情报库)
             if len(local_prototypes_collect) > 0:
                 self.aggregate_prototypes(local_prototypes_collect)
-                print(f"Server updated global prototypes. Covered classes: {len(self.global_prototypes)}/10")
             
             # 3. 测试与评估
             
-            test_acc = self.eval(test_loader=test_loader)
-            server_metrics = common.get_metrics(self.get_acc_matrix(test_loader=test_loader))
+            server_acc_matrix = self.get_acc_matrix(test_loader=test_loader)
+            server_metrics = common.get_metrics(server_acc_matrix)
+            test_acc = server_metrics["accuracy"]
+            server_confusion_path = os.path.join(self.confusion_matrix_dir, f"round_{r:03d}_server.csv")
+            self._write_confusion_matrix_csv(server_confusion_path, server_acc_matrix)
+            logger = self.logger
             wandb.log({
-                "sevrer_test/acc": test_acc,
-                "server_test/balanced_acc": server_metrics["recall_mean"],
+                "server_test/acc": test_acc,
+                "server_test/macro_recall": server_metrics["recall_mean"],
                 "server_test/macro_f1": server_metrics["f1"],
-                "server_test/precision_mean": server_metrics["precision_mean"],
-                "server_test/recall_mean": server_metrics["recall_mean"],
+                "server_test/macro_precision": server_metrics["precision_mean"],
                 "server/covered_classes": len(self.global_prototypes),
                 "server/global_anchor_margin": global_anchor_margin
             }, step=r)
-            print(f"Server ----> Round: {r:3d} | Test Acc: {test_acc:.4f}\n")
             acc.append(test_acc)
 
-            logger = self.logger
-            # 记录每个客户端归一化熵标准的变化
-            for client in self.clients:
-                logger.info(f"Client {client.client_id}: norm entropy = {client.norm_entropy:.4f}")
+            selected_client_ids = {client.client_id for client in selected_clients}
 
-            all_client_accs = []
             all_client_disamb_metrics = []
             for client in self.clients:
                 disamb_metrics = client.get_disambiguation_metrics()
-                _, mean_acc = client.calculate_class_wise_accuracy()
-                all_client_accs.append(mean_acc)
                 all_client_disamb_metrics.append(disamb_metrics)
-
-                # 3. 详细日志 (Verbose Logging)
-                # 记录每个 Client 的表现，方便排查掉队的节点 (Stragglers)
-                logger.info(
-                    f"Client {client.client_id}: Disamb Acc = {disamb_metrics['accuracy']:.4f}, "
-                    f"Balanced Acc = {disamb_metrics['balanced_acc']:.4f}, "
-                    f"Macro-F1 = {disamb_metrics['f1']:.4f}"
-                )
-            global_avg_acc = np.mean(all_client_accs)
-            logger.info(f"Round {r} Global Avg Disambiguation Acc: {global_avg_acc:.4f}")
+            mean_client_disamb_q_acc = float(np.mean([m["accuracy"] for m in all_client_disamb_metrics]))
+            mean_client_disamb_q_macro_recall = float(np.mean([m["recall_mean"] for m in all_client_disamb_metrics]))
+            mean_client_disamb_q_macro_precision = float(np.mean([m["precision_mean"] for m in all_client_disamb_metrics]))
+            mean_client_disamb_q_macro_f1 = float(np.mean([m["f1"] for m in all_client_disamb_metrics]))
+            std_client_disamb_q_macro_recall = float(np.std([m["recall_mean"] for m in all_client_disamb_metrics]))
 
             #每轮都测试一次泛化能力
-            client_test_accs = []
+            all_client_test_metrics = []
             if r >= 0:
                 for client in self.clients:
-                    client_test_acc = client.test(test_loader=clients_test_loaders[client.client_id], 
-                                epoch = r,
-                                )
-                    client_test_accs.append(client_test_acc)
-                    print(f'*****client: {client.client_id} test acc {client_test_acc}')
+                    client_test_matrix = client.get_acc_matrix(test_loader=clients_test_loaders[client.client_id])
+                    client_test_metrics = common.get_metrics(client_test_matrix)
+                    all_client_test_metrics.append(client_test_metrics)
+                    client_confusion_path = os.path.join(
+                        self.confusion_matrix_dir,
+                        f"round_{r:03d}_client_{client.client_id}_personalized_test.csv",
+                    )
+                    self._write_confusion_matrix_csv(client_confusion_path, client_test_matrix)
 
             vote_metric_clients = [client.last_train_metrics for client in selected_clients if client.last_train_metrics]
             vote_pseudo_accs = [m["vote_pseudo_acc"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
             vote_confidences = [m["vote_confidence"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
-            global_disamb_acc = float(np.mean([m["accuracy"] for m in all_client_disamb_metrics]))
-            global_disamb_balanced_acc = float(np.mean([m["balanced_acc"] for m in all_client_disamb_metrics]))
-            global_disamb_macro_f1 = float(np.mean([m["f1"] for m in all_client_disamb_metrics]))
-            client_disamb_std = float(np.std([m["balanced_acc"] for m in all_client_disamb_metrics]))
-            client_test_acc_mean = float(np.mean(client_test_accs)) if client_test_accs else 0.0
-            client_test_acc_std = float(np.std(client_test_accs)) if client_test_accs else 0.0
-            client_vote_pseudo_acc_mean = float(np.mean(vote_pseudo_accs)) if vote_pseudo_accs else 0.0
-            client_vote_confidence_mean = float(np.mean(vote_confidences)) if vote_confidences else 0.0
+            vote_confidence_p10s = [m["vote_confidence_p10"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_confidence_p50s = [m["vote_confidence_p50"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_confidence_p90s = [m["vote_confidence_p90"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_high_conf_error_rates = [m["vote_high_conf_error_rate"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_low_conf_correct_rates = [m["vote_low_conf_correct_rate"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            vote_sample_coverages = [m["vote_sample_coverage"] for m in vote_metric_clients if m.get("vote_samples", 0) > 0]
+            candidate_size_means = [m["candidate_size_mean"] for m in vote_metric_clients]
+            candidate_size_p90s = [m["candidate_size_p90"] for m in vote_metric_clients]
+            candidate_ambiguity_rates = [m["candidate_ambiguity_rate"] for m in vote_metric_clients]
+            client_personalized_test_accs = [m["accuracy"] for m in all_client_test_metrics]
+            mean_client_personalized_test_acc = float(np.mean(client_personalized_test_accs)) if client_personalized_test_accs else 0.0
+            std_client_personalized_test_acc = float(np.std(client_personalized_test_accs)) if client_personalized_test_accs else 0.0
+            min_client_personalized_test_acc = float(np.min(client_personalized_test_accs)) if client_personalized_test_accs else 0.0
+            p10_client_personalized_test_acc = float(np.percentile(client_personalized_test_accs, 10)) if client_personalized_test_accs else 0.0
+            mean_selected_client_vote_pseudo_acc = self._safe_mean(vote_pseudo_accs)
+            mean_selected_client_vote_confidence = self._safe_mean(vote_confidences)
+            mean_selected_client_vote_confidence_p10 = self._safe_mean(vote_confidence_p10s)
+            mean_selected_client_vote_confidence_p50 = self._safe_mean(vote_confidence_p50s)
+            mean_selected_client_vote_confidence_p90 = self._safe_mean(vote_confidence_p90s)
+            mean_selected_client_vote_high_conf_error_rate = self._safe_mean(vote_high_conf_error_rates)
+            mean_selected_client_vote_low_conf_correct_rate = self._safe_mean(vote_low_conf_correct_rates)
+            mean_selected_client_vote_sample_coverage = self._safe_mean(vote_sample_coverages)
+            mean_selected_client_candidate_size_mean = self._safe_mean(candidate_size_means)
+            mean_selected_client_candidate_size_p90 = self._safe_mean(candidate_size_p90s)
+            mean_selected_client_candidate_ambiguity_rate = self._safe_mean(candidate_ambiguity_rates)
+
+            self._log_round_metric_summary(
+                round_id=r,
+                server_metrics=server_metrics,
+                mean_client_disamb_q_acc=mean_client_disamb_q_acc,
+                mean_client_disamb_q_macro_recall=mean_client_disamb_q_macro_recall,
+                mean_client_disamb_q_macro_precision=mean_client_disamb_q_macro_precision,
+                mean_client_disamb_q_macro_f1=mean_client_disamb_q_macro_f1,
+                std_client_disamb_q_macro_recall=std_client_disamb_q_macro_recall,
+                mean_client_personalized_test_acc=mean_client_personalized_test_acc,
+                std_client_personalized_test_acc=std_client_personalized_test_acc,
+                min_client_personalized_test_acc=min_client_personalized_test_acc,
+                p10_client_personalized_test_acc=p10_client_personalized_test_acc,
+                mean_selected_client_vote_pseudo_acc=mean_selected_client_vote_pseudo_acc,
+                mean_selected_client_vote_confidence=mean_selected_client_vote_confidence,
+                mean_selected_client_vote_confidence_p10=mean_selected_client_vote_confidence_p10,
+                mean_selected_client_vote_confidence_p50=mean_selected_client_vote_confidence_p50,
+                mean_selected_client_vote_confidence_p90=mean_selected_client_vote_confidence_p90,
+                mean_selected_client_vote_high_conf_error_rate=mean_selected_client_vote_high_conf_error_rate,
+                mean_selected_client_vote_low_conf_correct_rate=mean_selected_client_vote_low_conf_correct_rate,
+                mean_selected_client_vote_sample_coverage=mean_selected_client_vote_sample_coverage,
+                mean_selected_client_candidate_size_mean=mean_selected_client_candidate_size_mean,
+                mean_selected_client_candidate_size_p90=mean_selected_client_candidate_size_p90,
+                mean_selected_client_candidate_ambiguity_rate=mean_selected_client_candidate_ambiguity_rate,
+            )
+            self._log_round_interpretation(
+                round_id=r,
+                server_acc=server_metrics["accuracy"],
+                mean_client_personalized_test_acc=mean_client_personalized_test_acc,
+                min_client_personalized_test_acc=min_client_personalized_test_acc,
+                p10_client_personalized_test_acc=p10_client_personalized_test_acc,
+                mean_client_disamb_q_macro_f1=mean_client_disamb_q_macro_f1,
+                mean_selected_client_vote_pseudo_acc=mean_selected_client_vote_pseudo_acc,
+                mean_selected_client_vote_confidence=mean_selected_client_vote_confidence,
+                mean_selected_client_vote_confidence_p90=mean_selected_client_vote_confidence_p90,
+                mean_selected_client_vote_high_conf_error_rate=mean_selected_client_vote_high_conf_error_rate,
+                mean_selected_client_candidate_ambiguity_rate=mean_selected_client_candidate_ambiguity_rate,
+            )
+            logger.info(f"Round {r} Client Metrics")
+            for line in self._format_client_metric_lines(all_client_disamb_metrics, all_client_test_metrics):
+                logger.info(f"Round {r}   {line}")
+            logger.info(f"Round {r} Worst Clients")
+            for line in self._format_worst_clients(all_client_test_metrics):
+                logger.info(f"Round {r}   {line}")
+            logger.info(
+                f"Round {r} Confusion | server={os.path.basename(server_confusion_path)}, "
+                f"clients=round_{r:03d}_client_<id>_personalized_test.csv"
+            )
+            logger.info(f"Round {r} Server Worst Classes")
+            for line in self._format_worst_confusion_classes(server_acc_matrix, server_metrics).split("; "):
+                logger.info(f"Round {r}   {line}")
 
             wandb.log({
-                "disamb/global_acc": global_disamb_acc,
-                "disamb/global_balanced_acc": global_disamb_balanced_acc,
-                "disamb/global_macro_f1": global_disamb_macro_f1,
-                "disamb/client_balanced_acc_std": client_disamb_std,
-                "client_test/mean_acc": client_test_acc_mean,
-                "client_test/std_acc": client_test_acc_std,
-                "vote/mean_pseudo_acc": client_vote_pseudo_acc_mean,
-                "vote/mean_confidence": client_vote_confidence_mean,
+                "client_disamb_q/mean_acc": mean_client_disamb_q_acc,
+                "client_disamb_q/mean_macro_recall": mean_client_disamb_q_macro_recall,
+                "client_disamb_q/mean_macro_precision": mean_client_disamb_q_macro_precision,
+                "client_disamb_q/mean_macro_f1": mean_client_disamb_q_macro_f1,
+                "client_disamb_q/std_macro_recall": std_client_disamb_q_macro_recall,
+                "client_personalized_test/mean_acc": mean_client_personalized_test_acc,
+                "client_personalized_test/std_acc": std_client_personalized_test_acc,
+                "client_personalized_test/min_acc": min_client_personalized_test_acc,
+                "client_personalized_test/p10_acc": p10_client_personalized_test_acc,
+                "selected_client_vote/mean_pseudo_acc": mean_selected_client_vote_pseudo_acc,
+                "selected_client_vote/mean_confidence": mean_selected_client_vote_confidence,
+                "selected_client_vote/mean_confidence_p10": mean_selected_client_vote_confidence_p10,
+                "selected_client_vote/mean_confidence_p50": mean_selected_client_vote_confidence_p50,
+                "selected_client_vote/mean_confidence_p90": mean_selected_client_vote_confidence_p90,
+                "selected_client_vote/mean_high_conf_error_rate": mean_selected_client_vote_high_conf_error_rate,
+                "selected_client_vote/mean_low_conf_correct_rate": mean_selected_client_vote_low_conf_correct_rate,
+                "selected_client_vote/mean_coverage": mean_selected_client_vote_sample_coverage,
+                "selected_client_candidate/mean_size": mean_selected_client_candidate_size_mean,
+                "selected_client_candidate/mean_size_p90": mean_selected_client_candidate_size_p90,
+                "selected_client_candidate/mean_ambiguity_rate": mean_selected_client_candidate_ambiguity_rate,
             }, step=r)
+            per_client_wandb_logs = {}
+            for client, disamb_metrics, test_metrics in zip(self.clients, all_client_disamb_metrics, all_client_test_metrics):
+                client_id = client.client_id
+                train_metrics = client.last_train_metrics or {}
+                per_client_wandb_logs.update({
+                    f"client_disamb_q/{client_id}/acc": disamb_metrics["accuracy"],
+                    f"client_disamb_q/{client_id}/macro_recall": disamb_metrics["recall_mean"],
+                    f"client_disamb_q/{client_id}/macro_precision": disamb_metrics["precision_mean"],
+                    f"client_disamb_q/{client_id}/macro_f1": disamb_metrics["f1"],
+                    f"client_personalized_test/{client_id}/acc": test_metrics["accuracy"],
+                    f"client_personalized_test/{client_id}/macro_recall": test_metrics["recall_mean"],
+                    f"client_personalized_test/{client_id}/macro_precision": test_metrics["precision_mean"],
+                    f"client_personalized_test/{client_id}/macro_f1": test_metrics["f1"],
+                    f"client_candidate/{client_id}/size_mean": train_metrics.get("candidate_size_mean", 0.0),
+                    f"client_candidate/{client_id}/ambiguity_rate": train_metrics.get("candidate_ambiguity_rate", 0.0),
+                    f"client_vote/{client_id}/confidence_p90": train_metrics.get("vote_confidence_p90", 0.0),
+                    f"client_vote/{client_id}/high_conf_error_rate": train_metrics.get("vote_high_conf_error_rate", 0.0),
+                })
+            if per_client_wandb_logs:
+                wandb.log(per_client_wandb_logs, step=r)
 
             with open(self.round_metrics_path, "a", newline="") as f:
                 writer = csv.writer(f)
@@ -376,16 +676,57 @@ class Server:
                     test_acc,
                     server_metrics["recall_mean"],
                     server_metrics["f1"],
-                    global_disamb_acc,
-                    global_disamb_balanced_acc,
-                    global_disamb_macro_f1,
-                    client_disamb_std,
-                    client_test_acc_mean,
-                    client_test_acc_std,
-                    client_vote_pseudo_acc_mean,
-                    client_vote_confidence_mean,
+                    mean_client_disamb_q_acc,
+                    mean_client_disamb_q_macro_recall,
+                    mean_client_disamb_q_macro_precision,
+                    mean_client_disamb_q_macro_f1,
+                    std_client_disamb_q_macro_recall,
+                    mean_client_personalized_test_acc,
+                    std_client_personalized_test_acc,
+                    min_client_personalized_test_acc,
+                    p10_client_personalized_test_acc,
+                    mean_selected_client_vote_pseudo_acc,
+                    mean_selected_client_vote_confidence,
+                    mean_selected_client_vote_confidence_p10,
+                    mean_selected_client_vote_confidence_p50,
+                    mean_selected_client_vote_confidence_p90,
+                    mean_selected_client_vote_high_conf_error_rate,
+                    mean_selected_client_vote_low_conf_correct_rate,
+                    mean_selected_client_vote_sample_coverage,
+                    mean_selected_client_candidate_size_mean,
+                    mean_selected_client_candidate_size_p90,
+                    mean_selected_client_candidate_ambiguity_rate,
                     "|".join(str(client.client_id) for client in selected_clients),
                 ])
+            with open(self.per_client_round_metrics_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                for client, disamb_metrics, test_metrics in zip(self.clients, all_client_disamb_metrics, all_client_test_metrics):
+                    train_metrics = client.last_train_metrics or {}
+                    writer.writerow([
+                        r,
+                        client.client_id,
+                        int(client.client_id in selected_client_ids),
+                        disamb_metrics["accuracy"],
+                        disamb_metrics["recall_mean"],
+                        disamb_metrics["precision_mean"],
+                        disamb_metrics["f1"],
+                        test_metrics["accuracy"],
+                        test_metrics["recall_mean"],
+                        test_metrics["precision_mean"],
+                        test_metrics["f1"],
+                        train_metrics.get("vote_confidence", 0.0),
+                        train_metrics.get("vote_confidence_p10", 0.0),
+                        train_metrics.get("vote_confidence_p50", 0.0),
+                        train_metrics.get("vote_confidence_p90", 0.0),
+                        train_metrics.get("vote_high_conf_error_rate", 0.0),
+                        train_metrics.get("vote_low_conf_correct_rate", 0.0),
+                        train_metrics.get("vote_sample_coverage", 0.0),
+                        train_metrics.get("candidate_size_mean", 0.0),
+                        train_metrics.get("candidate_size_std", 0.0),
+                        train_metrics.get("candidate_size_p50", 0.0),
+                        train_metrics.get("candidate_size_p90", 0.0),
+                        train_metrics.get("candidate_ambiguity_rate", 0.0),
+                    ])
                 
             # 每100轮画一次热力图 (原有逻辑)
             if (r + 1) % 100 == 0:

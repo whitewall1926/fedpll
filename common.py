@@ -444,15 +444,19 @@ import numpy as np
 import torch
 from torch.utils.data import Subset
 
-def split_testset_by_distribution(global_test_dataset, phi_matrix):
+def split_testset_by_distribution(global_test_dataset, distribution_matrix):
     """
-    根据训练数据的分布矩阵 phi_matrix，为每个客户端构建专属的测试集。
-    策略：只要客户端拥有某类训练数据，就分给它该类的所有测试数据。
+    根据 client-class 分布矩阵，为每个客户端构建专属测试集。
+
+    对每个类别，把该类别的测试样本按 distribution_matrix[:, class_id]
+    在客户端之间的比例分配。传入训练集 class-count 矩阵时，local test
+    的类别分布会尽量贴近 local train 的类别分布，并且不同客户端之间
+    不重复使用同一个测试样本。
     
     Args:
         global_test_dataset: PyTorch Dataset (e.g., CIFAR10 test set)
-        phi_matrix: [num_clients, num_classes] 矩阵，记录了每个客户端的类别分布情况
-                    (可以是数量，也可以是概率，只要 >0 代表存在即可)
+        distribution_matrix: [num_clients, num_classes] 矩阵，记录每个客户端的类别分布。
+                             推荐传训练集 class-count 矩阵；也兼容概率或二值矩阵。
     
     Returns:
         test_datasets: list of Subsets, len = num_clients
@@ -469,42 +473,51 @@ def split_testset_by_distribution(global_test_dataset, phi_matrix):
         # 这是一个比较暴力的 fallback，视具体 dataset 实现调整
         test_labels = np.array([y for _, y in global_test_dataset])
 
-    num_clients, num_classes = phi_matrix.shape
-    client_test_datasets = []
+    distribution_matrix = np.asarray(distribution_matrix, dtype=float)
+    num_clients, num_classes = distribution_matrix.shape
+    client_test_indices = [[] for _ in range(num_clients)]
 
     # 2. 建立“倒排索引”：记录每个类别对应的所有测试样本索引
     # class_id -> [idx1, idx2, idx5...]
     class_indices_map = {c: np.where(test_labels == c)[0] for c in range(num_classes)}
 
-    print(f"Start partitioning test set for {num_clients} clients...")
+    for class_id in range(num_classes):
+        indices = np.array(class_indices_map.get(class_id, []), dtype=int)
+        if len(indices) == 0:
+            continue
 
-    for client_idx in range(num_clients):
-        # 3. 找出当前客户端拥有的类别
-        # 假设 phi_matrix[k][c] > 0 表示该客户端拥有类别 c
-        client_dist_vec = phi_matrix[client_idx]
-        
-        # 获取该客户端拥有的所有类别索引
-        # 使用 > 0 判断，兼容 count 矩阵或 probability 矩阵
-        target_classes = np.where(np.array(client_dist_vec) > 0)[0]
-        
-        # 4. 收集这些类别对应的所有测试样本索引
-        client_test_indices = []
-        for c in target_classes:
-            if c in class_indices_map:
-                client_test_indices.extend(class_indices_map[c])
-        
-        # 排序索引（可选，为了美观和确定性）
-        client_test_indices = np.sort(client_test_indices)
-        
-        # 5. 创建 Subset
-        if len(client_test_indices) > 0:
-            client_subset = Subset(global_test_dataset, client_test_indices)
-            client_test_datasets.append(client_subset)
+        np.random.shuffle(indices)
+        class_weights = distribution_matrix[:, class_id]
+        eligible_clients = np.where(class_weights > 0)[0]
+        if len(eligible_clients) == 0:
+            continue
+
+        weights = class_weights[eligible_clients]
+        raw_counts = weights / weights.sum() * len(indices)
+        counts = np.floor(raw_counts).astype(int)
+
+        remainder = len(indices) - counts.sum()
+        if remainder > 0:
+            fractional_order = np.argsort(-(raw_counts - counts))
+            for offset in fractional_order[:remainder]:
+                counts[offset] += 1
+
+        start = 0
+        for offset, client_idx in enumerate(eligible_clients):
+            end = start + counts[offset]
+            if end > start:
+                client_test_indices[client_idx].extend(indices[start:end].tolist())
+            start = end
+
+    client_test_datasets = []
+    for client_idx, indices in enumerate(client_test_indices):
+        indices = np.sort(np.array(indices, dtype=int))
+        if len(indices) > 0:
+            client_test_datasets.append(Subset(global_test_dataset, indices))
         else:
-            print(f"[Warning] Client {client_idx} has no valid classes in phi_matrix!")
-            client_test_datasets.append(None) # 或者给一个空的 Subset
+            print(f"[Warning] Client {client_idx} has no valid test samples from distribution_matrix!")
+            client_test_datasets.append(Subset(global_test_dataset, []))
 
-    print(f"Successfully created {len(client_test_datasets)} local test datasets.")
     return client_test_datasets
 
 # --- 使用示例 ---
@@ -624,9 +637,6 @@ def generate_candidates(model, data_loader, device, noise_rate, num_classes=10):
     
     all_candidates = []
     
-    print(f"\n[Phase 2] Generating Partial Labels using Instance-Dependent Logic...")
-    print(f"Algorithm: Suppress GT -> Normalize Max -> Scale by Rate({noise_rate}) -> Binomial")
-
     with torch.no_grad():
         for inputs, targets in tqdm(data_loader, desc="Generating"):
             inputs, targets = inputs.to(device), targets.to(device)

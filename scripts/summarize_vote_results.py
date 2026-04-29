@@ -7,17 +7,32 @@ from statistics import mean, pstdev
 
 METRIC_FIELDS = [
     "server_test_acc",
-    "server_test_balanced_acc",
+    "server_test_macro_recall",
     "server_test_macro_f1",
-    "global_disamb_acc",
-    "global_disamb_balanced_acc",
-    "global_disamb_macro_f1",
-    "client_disamb_std",
-    "client_test_acc_mean",
-    "client_test_acc_std",
-    "client_vote_pseudo_acc_mean",
-    "client_vote_confidence_mean",
+    "mean_client_disamb_q_acc",
+    "mean_client_disamb_q_macro_recall",
+    "mean_client_disamb_q_macro_precision",
+    "mean_client_disamb_q_macro_f1",
+    "std_client_disamb_q_macro_recall",
+    "mean_client_personalized_test_acc",
+    "std_client_personalized_test_acc",
+    "min_client_personalized_test_acc",
+    "p10_client_personalized_test_acc",
+    "mean_selected_client_vote_pseudo_acc",
+    "mean_selected_client_vote_confidence",
 ]
+
+FIELD_ALIASES = {
+    "server_test_macro_recall": "server_test_balanced_acc",
+    "mean_client_disamb_q_acc": "global_disamb_acc",
+    "mean_client_disamb_q_macro_recall": "global_disamb_balanced_acc",
+    "mean_client_disamb_q_macro_f1": "global_disamb_macro_f1",
+    "std_client_disamb_q_macro_recall": "client_disamb_std",
+    "mean_client_personalized_test_acc": "client_test_acc_mean",
+    "std_client_personalized_test_acc": "client_test_acc_std",
+    "mean_selected_client_vote_pseudo_acc": "client_vote_pseudo_acc_mean",
+    "mean_selected_client_vote_confidence": "client_vote_confidence_mean",
+}
 
 
 def infer_vote_tag(run_dir: str) -> str:
@@ -43,6 +58,13 @@ def to_float(value: str) -> float:
         return 0.0
 
 
+def get_metric(row, field: str) -> float:
+    value = row.get(field)
+    if value is None and field in FIELD_ALIASES:
+        value = row.get(FIELD_ALIASES[field])
+    return to_float(value)
+
+
 def build_summary_rows(run_dirs):
     summary_rows = []
     for run_dir in sorted(run_dirs):
@@ -60,7 +82,7 @@ def build_summary_rows(run_dirs):
             "last_round": int(float(last_row["round"])),
         }
         for field in METRIC_FIELDS:
-            row[field] = to_float(last_row.get(field))
+            row[field] = get_metric(last_row, field)
         summary_rows.append(row)
     return summary_rows
 
@@ -152,13 +174,13 @@ def main():
     print_table(
         "Per-run summary",
         summary_rows,
-        ["run_dir", "vote_tag", "server_test_acc", "global_disamb_balanced_acc", "client_vote_pseudo_acc_mean"],
+        ["run_dir", "vote_tag", "server_test_acc", "mean_client_disamb_q_macro_recall", "mean_selected_client_vote_pseudo_acc"],
     )
     print()
     print_table(
         "Grouped summary",
         aggregate_rows,
-        ["vote_tag", "num_runs", "server_test_acc_mean", "global_disamb_balanced_acc_mean", "client_vote_pseudo_acc_mean_mean"],
+        ["vote_tag", "num_runs", "server_test_acc_mean", "mean_client_disamb_q_macro_recall_mean", "mean_selected_client_vote_pseudo_acc_mean"],
     )
 
 
