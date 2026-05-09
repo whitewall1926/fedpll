@@ -219,6 +219,7 @@ class Client:
         self.local_model = copy.deepcopy(local_model).to(self.device)
         self.vote_model = copy.deepcopy(local_model).to(self.device)
         self.vote_model.eval()
+        self.shared_vote_state_dict = copy.deepcopy(self.local_model.state_dict())
 
         
         
@@ -235,6 +236,55 @@ class Client:
         self.optimizer = None
         self.epochs = self.config.local_epochs
         self.global_model = None
+
+    def _compute_update_l2_norm(self, delta_state_dict: Dict[str, torch.Tensor]) -> float:
+        flat_tensors = [
+            value.detach().reshape(-1)
+            for value in delta_state_dict.values()
+            if torch.is_tensor(value) and value.dtype.is_floating_point
+        ]
+        if not flat_tensors:
+            return 0.0
+        flat = torch.cat(flat_tensors)
+        return float(torch.norm(flat, p=2).item())
+
+    def _build_shared_vote_state_dict(
+        self,
+        local_state_dict: Dict[str, torch.Tensor],
+        global_state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        shared_state_dict = copy.deepcopy(local_state_dict)
+        if not self.config.share_noisy_vote_models:
+            return shared_state_dict
+
+        delta_state_dict = {}
+        for key, local_value in local_state_dict.items():
+            if torch.is_tensor(local_value) and local_value.dtype.is_floating_point:
+                global_value = global_state_dict[key].to(local_value.device)
+                delta_state_dict[key] = local_value - global_value
+
+        update_norm = self._compute_update_l2_norm(delta_state_dict)
+        clip_norm = max(self.config.share_noise_clip_norm, 1e-12)
+        clip_factor = min(1.0, clip_norm / (update_norm + 1e-12))
+        noise_std = self.config.share_noise_multiplier * clip_norm
+
+        for key, local_value in local_state_dict.items():
+            if not (torch.is_tensor(local_value) and local_value.dtype.is_floating_point):
+                shared_state_dict[key] = local_value.detach().cpu().clone()
+                continue
+            global_value = global_state_dict[key].to(local_value.device)
+            clipped_delta = delta_state_dict[key] * clip_factor
+            if noise_std > 0:
+                clipped_delta = clipped_delta + torch.randn_like(clipped_delta) * noise_std
+            shared_state_dict[key] = (global_value + clipped_delta).detach().cpu().clone()
+
+        self.last_train_metrics["shared_vote_update_l2_norm"] = update_norm
+        self.last_train_metrics["shared_vote_clip_factor"] = clip_factor
+        self.last_train_metrics["shared_vote_noise_std"] = noise_std
+        return shared_state_dict
+
+    def get_shared_vote_state_dict(self) -> Dict[str, torch.Tensor]:
+        return copy.deepcopy(self.shared_vote_state_dict)
 
     def _compute_candidate_stats(self) -> Dict[str, float]:
         candidate_labels = self.train_plldataset.candidate_labels
@@ -1146,6 +1196,11 @@ class Client:
             "vote_sample_coverage": vote_sample_coverage,
             **self.candidate_stats,
         }
+        local_state_dict = self.local_model.state_dict()
+        self.shared_vote_state_dict = self._build_shared_vote_state_dict(
+            local_state_dict=local_state_dict,
+            global_state_dict=global_model_state_dict,
+        )
 
         logs_to_wandb = {
             f"client_train/{self.client_id}/acc": avg_train_acc,
@@ -1154,6 +1209,10 @@ class Client:
             f"client_candidate/{self.client_id}/size_p90": self.candidate_stats["candidate_size_p90"],
             f"client_candidate/{self.client_id}/ambiguity_rate": self.candidate_stats["candidate_ambiguity_rate"],
         }
+        if self.config.share_noisy_vote_models:
+            logs_to_wandb[f"shared_vote/{self.client_id}/update_l2_norm"] = self.last_train_metrics["shared_vote_update_l2_norm"]
+            logs_to_wandb[f"shared_vote/{self.client_id}/clip_factor"] = self.last_train_metrics["shared_vote_clip_factor"]
+            logs_to_wandb[f"shared_vote/{self.client_id}/noise_std"] = self.last_train_metrics["shared_vote_noise_std"]
         if total_vote_samples > 0:
             logs_to_wandb[f"selected_client_vote/{self.client_id}/pseudo_acc"] = vote_pseudo_acc
             logs_to_wandb[f"selected_client_vote/{self.client_id}/confidence"] = vote_conf_mean
@@ -1189,7 +1248,7 @@ class Client:
         # 发送 Wandb
         wandb.log(logs_to_wandb, step=roud)
 
-        return self.local_model.state_dict()
+        return local_state_dict
     
     def _get_all_targets(self):
         """

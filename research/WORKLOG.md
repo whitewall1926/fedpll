@@ -1,5 +1,54 @@
 # 工作记录
 
+## 2026-05-10
+
+### 本次目标
+
+在不改变现有联邦聚合主流程的前提下，实现“对本地模型更新加噪后再共享给其他客户端用于投票”的隐私增强版本。
+
+### 本次完成
+
+- 修改 `common.py`：
+  - 新增投票共享隐私配置：
+    - `share_noisy_vote_models`
+    - `share_noise_clip_norm`
+    - `share_noise_multiplier`
+- 修改 `client.py`：
+  - 为每个客户端增加 `shared_vote_state_dict`
+  - 新增本地更新 `L2` 范数计算 helper
+  - 新增“裁剪本地更新 + 添加高斯噪声 + 重构共享模型”逻辑
+  - 保持联邦聚合仍使用干净的本地模型参数
+  - 仅将加噪后的共享模型参数暴露给后续投票阶段使用
+  - 新增共享模型日志：
+    - `shared_vote_update_l2_norm`
+    - `shared_vote_clip_factor`
+    - `shared_vote_noise_std`
+- 修改 `server.py`：
+  - 当启用 `share_noisy_vote_models` 时，投票模型池改为使用客户端的 `shared_vote_state_dict`
+  - 当未启用时，保持原有逻辑不变
+- 新增 `scripts/run_vote_noisy_share_comparison.sh`：
+  - 固定单个 data noise，比较 `vote0`、干净共享 `vote10` 和不同共享噪声强度下的 `vote10`
+  - 默认设定：`seed=42`、`rounds=30`、`noise_level=0.4`
+  - 默认共享噪声强度：`0.1 0.3 0.5`
+  - 自动生成临时 YAML 并在结束后执行结果汇总
+
+### 本次涉及文件
+
+- `common.py`
+- `client.py`
+- `server.py`
+- `scripts/run_vote_noisy_share_comparison.sh`
+- `research/WORKLOG.md`
+
+### 验证方式
+
+- 已运行 `python3 -m py_compile common.py client.py server.py`，语法通过。
+- 已运行 `bash -n scripts/run_vote_noisy_share_comparison.sh`，语法通过。
+- 待用后续实验确认：
+  - 投票阶段确实使用加噪共享模型
+  - 联邦聚合仍使用未加噪本地模型
+  - `share_noise_multiplier` 增大时，vote 指标和本地消歧指标按预期变化
+
 ## 2026-04-28
 
 ### 本次目标

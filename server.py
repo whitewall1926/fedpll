@@ -458,10 +458,16 @@ class Server:
             vote_model_state_dicts = None
             if self.config.use_vote_pseudo:
                 num_vote_models = min(self.config.vote_num_models, len(self.clients))
-                vote_model_state_dicts = [
-                    copy.deepcopy(client.local_model.state_dict())
-                    for client in self.clients[:num_vote_models]
-                ]
+                if self.config.share_noisy_vote_models:
+                    vote_model_state_dicts = [
+                        client.get_shared_vote_state_dict()
+                        for client in self.clients[:num_vote_models]
+                    ]
+                else:
+                    vote_model_state_dicts = [
+                        copy.deepcopy(client.local_model.state_dict())
+                        for client in self.clients[:num_vote_models]
+                    ]
 
             selected_weights = [self.weights[self.clients.index(client)] for client in selected_clients]
             global_anchor_margin = self.compute_anchor_margin(self.semantic_anchors) if self.config.fedsa else 0.0
