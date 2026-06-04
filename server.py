@@ -144,13 +144,21 @@ class Server:
             for client_id, metrics in worst_items
         ]
 
-    def _format_client_metric_lines(self, disamb_metrics: List[Dict], test_metrics: List[Dict]) -> List[str]:
+    def _format_client_metric_lines(
+        self,
+        disamb_metrics: List[Dict],
+        test_metrics: List[Dict],
+        train_metrics_list: List[Dict],
+    ) -> List[str]:
         if not disamb_metrics or not test_metrics:
             return ["no client metrics"]
         lines = []
-        for client_id, (disamb, test) in enumerate(zip(disamb_metrics, test_metrics)):
+        for client_id, (disamb, test, train_metrics) in enumerate(
+            zip(disamb_metrics, test_metrics, train_metrics_list)
+        ):
             lines.append(
                 f"client {client_id}: acc={test['accuracy']:.4f}, "
+                f"train_acc={train_metrics.get('train_acc', 0.0):.4f}, "
                 f"macro_recall={test['recall_mean']:.4f}, "
                 f"macro_f1={test['f1']:.4f}, "
                 f"q_acc={disamb['accuracy']:.4f}, "
@@ -213,6 +221,7 @@ class Server:
         std_client_personalized_test_acc: float,
         min_client_personalized_test_acc: float,
         p10_client_personalized_test_acc: float,
+        mean_selected_client_train_acc: float,
         mean_selected_client_vote_pseudo_acc: float,
         mean_selected_client_vote_confidence: float,
         mean_selected_client_vote_confidence_p10: float,
@@ -234,7 +243,8 @@ class Server:
             f"acc_mean={mean_client_personalized_test_acc:.4f}, "
             f"acc_std={std_client_personalized_test_acc:.4f}, "
             f"acc_min={min_client_personalized_test_acc:.4f}, "
-            f"acc_p10={p10_client_personalized_test_acc:.4f}"
+            f"acc_p10={p10_client_personalized_test_acc:.4f}, "
+            f"selected_train_acc={mean_selected_client_train_acc:.4f}"
         )
         self.logger.info(
             f"Round {round_id} Disamb Q | acc={mean_client_disamb_q_acc:.4f}, "
@@ -318,6 +328,7 @@ class Server:
                 "mean_client_disamb_q_macro_f1",
                 "std_client_disamb_q_macro_recall",
                 "mean_client_personalized_test_acc",
+                "mean_selected_client_train_acc",
                 "std_client_personalized_test_acc",
                 "min_client_personalized_test_acc",
                 "p10_client_personalized_test_acc",
@@ -345,6 +356,7 @@ class Server:
                 "client_disamb_q_macro_precision",
                 "client_disamb_q_macro_f1",
                 "client_personalized_test_acc",
+                "client_train_acc",
                 "client_personalized_test_macro_recall",
                 "client_personalized_test_macro_precision",
                 "client_personalized_test_macro_f1",
@@ -564,6 +576,7 @@ class Server:
             candidate_size_means = [m["candidate_size_mean"] for m in vote_metric_clients]
             candidate_size_p90s = [m["candidate_size_p90"] for m in vote_metric_clients]
             candidate_ambiguity_rates = [m["candidate_ambiguity_rate"] for m in vote_metric_clients]
+            selected_client_train_accs = [m["train_acc"] for m in vote_metric_clients if "train_acc" in m]
             client_personalized_test_accs = [m["accuracy"] for m in all_client_test_metrics]
             mean_client_personalized_test_acc = float(np.mean(client_personalized_test_accs)) if client_personalized_test_accs else 0.0
             std_client_personalized_test_acc = float(np.std(client_personalized_test_accs)) if client_personalized_test_accs else 0.0
@@ -580,6 +593,7 @@ class Server:
             mean_selected_client_candidate_size_mean = self._safe_mean(candidate_size_means)
             mean_selected_client_candidate_size_p90 = self._safe_mean(candidate_size_p90s)
             mean_selected_client_candidate_ambiguity_rate = self._safe_mean(candidate_ambiguity_rates)
+            mean_selected_client_train_acc = self._safe_mean(selected_client_train_accs)
 
             self._log_round_metric_summary(
                 round_id=r,
@@ -593,6 +607,7 @@ class Server:
                 std_client_personalized_test_acc=std_client_personalized_test_acc,
                 min_client_personalized_test_acc=min_client_personalized_test_acc,
                 p10_client_personalized_test_acc=p10_client_personalized_test_acc,
+                mean_selected_client_train_acc=mean_selected_client_train_acc,
                 mean_selected_client_vote_pseudo_acc=mean_selected_client_vote_pseudo_acc,
                 mean_selected_client_vote_confidence=mean_selected_client_vote_confidence,
                 mean_selected_client_vote_confidence_p10=mean_selected_client_vote_confidence_p10,
@@ -619,7 +634,12 @@ class Server:
                 mean_selected_client_candidate_ambiguity_rate=mean_selected_client_candidate_ambiguity_rate,
             )
             logger.info(f"Round {r} Client Metrics")
-            for line in self._format_client_metric_lines(all_client_disamb_metrics, all_client_test_metrics):
+            all_client_train_metrics = [client.last_train_metrics or {} for client in self.clients]
+            for line in self._format_client_metric_lines(
+                all_client_disamb_metrics,
+                all_client_test_metrics,
+                all_client_train_metrics,
+            ):
                 logger.info(f"Round {r}   {line}")
             logger.info(f"Round {r} Worst Clients")
             for line in self._format_worst_clients(all_client_test_metrics):
@@ -642,6 +662,7 @@ class Server:
                 "client_personalized_test/std_acc": std_client_personalized_test_acc,
                 "client_personalized_test/min_acc": min_client_personalized_test_acc,
                 "client_personalized_test/p10_acc": p10_client_personalized_test_acc,
+                "selected_client_train/mean_acc": mean_selected_client_train_acc,
                 "selected_client_vote/mean_pseudo_acc": mean_selected_client_vote_pseudo_acc,
                 "selected_client_vote/mean_confidence": mean_selected_client_vote_confidence,
                 "selected_client_vote/mean_confidence_p10": mean_selected_client_vote_confidence_p10,
@@ -667,6 +688,7 @@ class Server:
                     f"client_personalized_test/{client_id}/macro_recall": test_metrics["recall_mean"],
                     f"client_personalized_test/{client_id}/macro_precision": test_metrics["precision_mean"],
                     f"client_personalized_test/{client_id}/macro_f1": test_metrics["f1"],
+                    f"client_train/{client_id}/acc": train_metrics.get("train_acc", 0.0),
                     f"client_candidate/{client_id}/size_mean": train_metrics.get("candidate_size_mean", 0.0),
                     f"client_candidate/{client_id}/ambiguity_rate": train_metrics.get("candidate_ambiguity_rate", 0.0),
                     f"client_vote/{client_id}/confidence_p90": train_metrics.get("vote_confidence_p90", 0.0),
@@ -688,6 +710,7 @@ class Server:
                     mean_client_disamb_q_macro_f1,
                     std_client_disamb_q_macro_recall,
                     mean_client_personalized_test_acc,
+                    mean_selected_client_train_acc,
                     std_client_personalized_test_acc,
                     min_client_personalized_test_acc,
                     p10_client_personalized_test_acc,
@@ -717,6 +740,7 @@ class Server:
                         disamb_metrics["precision_mean"],
                         disamb_metrics["f1"],
                         test_metrics["accuracy"],
+                        train_metrics.get("train_acc", 0.0),
                         test_metrics["recall_mean"],
                         test_metrics["precision_mean"],
                         test_metrics["f1"],
