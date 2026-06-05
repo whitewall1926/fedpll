@@ -85,6 +85,7 @@ class ExperimentConfig(BaseModel):
     share_noisy_vote_models: bool = False
     share_noise_clip_norm: float = 1.0
     share_noise_multiplier: float = 0.0
+    update_q: bool = True
 
     # --- [工业级] 校验逻辑 ---
     @field_validator('lr')

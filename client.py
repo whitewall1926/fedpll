@@ -666,7 +666,8 @@ class Client:
             p = pseudo_labels.to(output.device)
 
         # EMA 更新 q 向量
-        q[idxs] = q[idxs] * miu + (1 - miu) * p
+        if self.config.update_q:
+            q[idxs] = q[idxs] * miu + (1 - miu) * p
 
         log_probs = torch.log_softmax(output, dim=1)
         loss = -(q[idxs] * log_probs).sum(dim=1).mean()
@@ -1425,8 +1426,8 @@ class Client:
         p[torch.arange(batch_size), pred_idx] = 1.0
         
         p_soft = torch.softmax(logits_masked.detach(), dim=1)
-        q[idxs] = q[idxs] * miu + (1 - miu) * p_soft
-
+        if self.config.update_q:
+            q[idxs] = q[idxs] * miu + (1 - miu) * p_soft
 
         log_probs = torch.log_softmax(output, dim=1)
         loss = -(q[idxs] * log_probs).sum(dim=1).mean()
@@ -1472,8 +1473,8 @@ class Client:
         p = torch.zeros_like(output)     # [batch_size, num_classes]
         p[torch.arange(batch_size), pred_idx] = 1.0
 
-        q[idxs] = q[idxs] * miu + (1 - miu) * p
-
+        if self.config.update_q:
+            q[idxs] = q[idxs] * miu + (1 - miu) * p
 
         log_probs = torch.log_softmax(output, dim=1)
         loss = -(q[idxs] * log_probs).sum(dim=1).mean()
