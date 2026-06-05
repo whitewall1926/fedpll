@@ -1,5 +1,66 @@
 # 工作记录
 
+
+## 2026-06-05
+
+### 本次目标
+
+把当前方法线拆分清楚，在不改变主联邦框架的前提下补出可公平比较的 `FedAvg` 基线，并把当前工作区状态记录到 `research/` 中，方便新窗口恢复上下文。
+
+### 本次完成
+
+- 修改 `server.py`：
+  - 新增训练准确率输出到 round 日志、per-client 日志和 CSV
+  - `Client Overall` 新增 `selected_train_acc`
+  - `Client Metrics` 新增每客户端 `train_acc`
+  - `round_metrics.csv` 新增 `mean_selected_client_train_acc`
+  - `per_client_round_metrics.csv` 新增 `client_train_acc`
+- 新增实验配置：
+  - `configs/vote/fast/config_vote10_r50_s42.yaml`
+  - `configs/vote/full/config_vote10_r200_s42.yaml`
+  - `configs/vote/full/config_vote0_r101_s42.yaml`
+- 修改 `common.py`：
+  - 新增 `update_q` 配置开关，默认 `True`
+- 修改 `client.py`：
+  - 在 `pll_loss_with_external_pseudo()`、`pll_loss_vectorized_soft_preds()`、`pll_loss_vectorized()` 中用 `update_q` 控制是否更新 `q`
+- 新增 `configs/vote/full/config_fedavg_r101_s42.yaml`：
+  - 关闭投票
+  - 设置 `update_q: false`
+  - 作为固定候选 soft-label 的 `FedAvg` 基线
+- 已完成的关键提交：
+  - `d2b8d91` `Add training accuracy metrics and vote experiment configs`
+  - `000a902` `Add fixed-q FedAvg baseline for PLL comparison`
+
+### 本次设计意图
+
+这次更改的核心不是增加一个新配置，而是把三类方法的定义拆清楚：
+
+- `FedAvg`：固定 `q`，不更新置信度向量
+- `FedAvg-PLL`：不使用投票，但本地动态更新 `q`
+- `FedVotePLL`：使用多客户端投票结果更新 `q`
+
+这样后续实验比较时，可以把性能差异归因到：
+
+1. 是否进行本地动态消歧
+2. 是否引入跨客户端投票增强
+
+而不是混杂在不同仓库、不同日志格式、不同评估口径里。
+
+### 当前工作区状态
+
+- 当前分支：`feature/vote-pseudo-label`
+- 当前工作区：干净
+- 最近关键提交：
+  - `000a902` `Add fixed-q FedAvg baseline for PLL comparison`
+  - `d2b8d91` `Add training accuracy metrics and vote experiment configs`
+
+### 验证方式
+
+- 已运行 `python -m py_compile common.py client.py server.py main.py`，语法通过。
+- 当前 `FedAvg` 基线可直接运行：
+  - `python main.py --config configs/vote/full/config_fedavg_r101_s42.yaml`
+
+
 ## 2026-05-10
 
 ### 本次目标

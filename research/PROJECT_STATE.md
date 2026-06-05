@@ -1,6 +1,6 @@
 # 项目状态
 
-最后更新：2026-04-28
+最后更新：2026-06-05
 
 ## 当前分支
 
@@ -10,33 +10,46 @@
 
 这是一个个性化联邦学习实验仓库。
 
-当前主问题不是单纯提升全局模型，而是理解 `vote pseudo label` 为什么有效，以及它带来的本地消歧提升能否在个性化场景下稳定转化为更好的客户端表现，并与 `server test acc` 形成一致收益。
+当前主问题不再只是解释 `vote pseudo label` 为什么有效，而是要把方法线拆分清楚：
 
+- `FedVotePLL`：带多客户端投票伪标签的动态消歧版本
+- `FedAvg-PLL`：不使用投票，但保留本地动态 `q` 更新的 PLL 版本
+- `FedAvg`：固定候选标签 soft-label、训练过程中不更新 `q` 的联邦基线
+
+当前重点是保证这三类方法在同一联邦训练框架、相同数据划分和相同评估口径下可以公平比较，从而把性能差异解释为“是否使用动态消歧 / 是否使用投票增强”的方法差异，而不是工程设置差异。
 ## 当前假设
 
-- 提升可能来自外部伪标签本身。
-- 提升可能来自 `vote_num_models` 带来的投票规模变化。
-- 提升可能主要来自 `q vector` 更新更加稳定。
-- 本地 `disambiguation` 指标提升不一定等价于个性化测试收益提升。
-- 个性化收益提升也不一定等价于全局 `server test acc` 提升。
-
+- `FedVotePLL > FedAvg-PLL`：说明多客户端投票伪标签能提升动态消歧质量。
+- `FedAvg-PLL > FedAvg`：说明本地动态 `q` 更新本身就比固定候选 soft-label 更有效。
+- 如果 `FedVotePLL > FedAvg`，则整体收益来自“动态消歧 + 投票共识”共同作用。
+- 个性化本地测试准确率、`q` 消歧准确率和 `server test acc` 可能并不完全同步，需要拆开解释。
+- 当前 `train_acc` 只是训练态 batch 上的即时准确率，不能直接等同于标准训练集评估精度。
 ## 当前重点
 
-- 比较 `vote0`、`vote1`、`vote3`、`vote5`、`vote10`。
-- 同时跟踪本地消歧指标、`client_test_acc_mean` 和 `server test acc`。
-- 结合 `round_metrics.csv` 和最近 commit 历史判断实验进展。
-- 新实验开始记录 per-client 轮级指标，支持最终 10 轮客户端级分析。
-- local test set 现在按 local train class-count 比例划分，避免只匹配类别集合而不匹配数量分布。
-
+- 明确三类方法的算法定义与实验口径：`FedAvg`、`FedAvg-PLL`、`FedVotePLL`。
+- 继续使用当前统一日志格式跟踪：
+  - `server test acc`
+  - `client personalized test acc`
+  - `disamb q acc`
+  - `train_acc`
+- 使用新 notebook / 脚本从日志提取每轮 10 个客户端的平均：
+  - 测试准确率
+  - 训练准确率
+  - 消歧准确率
+- 维护 `research/` 中的状态记录，保证新窗口打开后可以快速恢复上下文。
 ## 当前阶段性结论
 
-- 从当前已汇总的结果看，`vote pseudo label` 能明显提升本地消歧指标和 `client_test_acc_mean`。
-- 这说明它在个性化联邦学习语境下，至少对客户端侧表现有明显帮助。
-- 但这种提升目前没有稳定转化为更高的 `server test acc`。
-- 当前已完成 run 中，`vote0` 的 `server_test_acc` 最高，`vote1` 最差。
-- `vote5` 和 `vote10` 在本地指标上明显优于 `vote0`，说明投票规模可能确实在增强本地消歧。
-- 当前本地汇总中每个 `vote_tag` 已有 3 个 run，但仍需要用新日志格式重跑以获得 per-client final-10 指标。
-
+- 当前 `vote pseudo label` 路线已具备较完整的实验配置与日志记录能力。
+- 已新增训练准确率日志与 CSV 输出，便于区分训练态与测试态表现。
+- 已实现“固定 `q` 的 FedAvg 基线”开关：通过 `update_q: false` 可以关闭训练过程中的 `q` 更新。
+- 这样可以在同一代码框架中比较：
+  - 固定候选标签 soft-label（FedAvg）
+  - 本地动态消歧（FedAvg-PLL）
+  - 多客户端投票增强消歧（FedVotePLL）
+- 目前 `feature/vote-pseudo-label` 分支已经包含：
+  - 训练准确率输出
+  - vote 相关实验配置
+  - fixed-q FedAvg 基线配置
 ## 当前代码脉络
 
 - [main.py](/home/yxf/proj/main.py)：加载配置和数据集，启动 `Server`
@@ -51,20 +64,16 @@
 
 ## 下一步
 
-- 然后继续深入分析 `client.py`，重点解释 `q` 更新与 `vote pseudo label` 的作用机制。
-- 继续积累更多 seed 的完整结果，验证个性化收益和全局收益之间的偏差是否稳定存在。
-- 用新日志格式重新运行需要 per-client final-10 分析的 vote 实验。
-- 运行单 seed `noise_level × {vote0, vote5, vote10}` 扫描：
-  - 脚本：`scripts/run_vote_noise_single_seed.sh`
-  - 默认设定：`seed=42`、`rounds=30`、`noise_level={0.3,0.4,0.5,0.6}`
-- 跑完后优先比较弱客户端是否被 `vote5/10` 修复：
-  - 脚本：`scripts/compare_weak_clients.py`
-  - 重点观察 `client 2`、`client 5`、`client 1`
-  - 核心指标：`client_personalized_test_acc`、`client_disamb_q_macro_f1`
-- 判断高噪声下多模型投票是否更鲁棒：
-  - 主指标：`mean_client_disamb_q_macro_recall`
-  - 辅助指标：`mean_client_disamb_q_acc`、`mean_client_personalized_test_acc`
-  - 诊断指标：`mean_selected_client_vote_high_conf_error_rate`
-- 运行 `scripts/summarize_per_client_metrics.py`，统计每个客户端最终 10 轮：
-  - q-vector 消歧指标：accuracy / macro recall / macro precision / macro f1
-  - 个性化测试指标：accuracy / macro recall / macro precision / macro f1
+- 运行并比较以下配置：
+  - `configs/vote/full/config_fedavg_r101_s42.yaml`
+  - `configs/vote/full/config_vote0_r101_s42.yaml`
+  - `configs/vote/full/config_vote10_r200_s42.yaml` 或对应 101 轮对齐版本
+- 明确中期汇报中的方法命名与问题定义：
+  - `FedAvg`：固定 `q`
+  - `FedAvg-PLL`：动态 `q`
+  - `FedVotePLL`：投票更新 `q`
+- 继续完善 notebook，把日志提取、均值统计和论文风格绘图统一起来。
+- 如果后续要切到新窗口，优先阅读：
+  - `research/PROJECT_STATE.md`
+  - `research/WORKLOG.md`
+  - 最近两个 commit：`000a902`、`d2b8d91`
