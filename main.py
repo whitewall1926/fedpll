@@ -15,6 +15,8 @@ from datetime import datetime
 
 import json
 import argparse
+import csv
+from pathlib import Path
 
 
 def build_experiment_name(config: ExperimentConfig) -> str:
@@ -52,7 +54,12 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default='config.yaml', help='配置文件')
     args = parser.parse_args()
 
-    if not os.getenv("WANDB_API_KEY"):
+    wandb_mode = os.getenv("WANDB_MODE", "online").lower()
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        print(f"❌ 非法的 WANDB_MODE: {wandb_mode}，仅支持 online/offline/disabled")
+        exit(1)
+
+    if wandb_mode == "online" and not os.getenv("WANDB_API_KEY"):
         print("❌ 缺少环境变量 WANDB_API_KEY，请先在 shell 中导出后再运行。")
         print("   例如: export WANDB_API_KEY=your_wandb_api_key")
         exit(1)
@@ -64,6 +71,8 @@ if __name__ == "__main__":
         exit(1)
     
     experiment_name = build_experiment_name(config)
+    config_path = Path(args.config).resolve()
+    config_stem = config_path.stem
     
          
     with wandb.init(
@@ -71,6 +80,7 @@ if __name__ == "__main__":
         entity='whitewall_9-jinan-university', 
         config=config.model_dump(), # 传字典给 wandb
         name=experiment_name,
+        mode=wandb_mode,
         group=f"vote_{config.dataset.lower()}_{config.model_name.lower()}_noise{config.noise_level}",
         tags=[
             f"seed:{config.seed}",
@@ -95,10 +105,45 @@ if __name__ == "__main__":
         current_date = datetime.now().strftime("%Y-%m-%d")
         save_dir = os.path.join('./logs', current_date)
         os.makedirs(save_dir, exist_ok=True)
-        logger = setup_logger(save_path=save_dir, log_file_name=f"{config.exp_id}.log")
+        log_file_name = f"{config_stem}__{config.exp_id}.log"
+        log_file_path = os.path.abspath(os.path.join(save_dir, log_file_name))
+        logger = setup_logger(save_path=save_dir, log_file_name=log_file_name)
+
+        run_index_path = os.path.join(save_dir, "run_index.csv")
+        run_index_exists = os.path.exists(run_index_path)
+        with open(run_index_path, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if not run_index_exists:
+                writer.writerow([
+                    "timestamp",
+                    "run_id",
+                    "exp_name",
+                    "config_stem",
+                    "config_path",
+                    "log_file",
+                    "dataset",
+                    "model_name",
+                    "noise_level",
+                    "vote_num_models",
+                ])
+            writer.writerow([
+                datetime.now().isoformat(timespec="seconds"),
+                config.exp_id,
+                config.exp_name,
+                config_stem,
+                str(config_path),
+                log_file_path,
+                config.dataset,
+                config.model_name,
+                config.noise_level,
+                config.vote_num_models if config.use_vote_pseudo else 0,
+            ])
         
         # 4. [Print Config] 打印简洁实验摘要；完整配置已在 W&B config 中保存。
         logger.info(f"Experiment | name={config.exp_name}")
+        logger.info(f"Experiment | wandb_mode={wandb_mode}")
+        logger.info(f"Experiment | config_file={config_path}")
+        logger.info(f"Experiment | log_file={log_file_path}")
         logger.info(
             f"Experiment | dataset={config.dataset}, model={config.model_name}, "
             f"seed={config.seed}, rounds={config.rounds}, clients={config.num_clients}"
