@@ -59,12 +59,17 @@ class Client:
         if self.config.uniform == False:
             
             gen_loader = DataLoader(self.train_dataset, batch_size=128, shuffle=False)
-            resnet18 = model.get_resnet18(pretrained=True)
-            id_all_candidates = common.generate_candidates(model=resnet18, 
+            candidate_in_channels = 1 if self.config.dataset.lower() in {"fashionmnist", "mnist"} else 3
+            candidate_model = model.get_resnet18(
+                pretrained=True,
+                in_channels=candidate_in_channels,
+                num_classes=self.config.num_classes,
+            )
+            id_all_candidates = common.generate_candidates(model=candidate_model,
                                                         data_loader=gen_loader,
-                                                        device='cuda',
+                                                        device=self.device,
                                                         noise_rate=self.config.noise_level,
-                                                        num_classes=10)
+                                                        num_classes=self.config.num_classes)
         
         candidate_labels = []
 

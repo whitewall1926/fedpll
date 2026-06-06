@@ -111,14 +111,20 @@ class LeNet5(nn.Module):
     
 from torchvision.models import resnet18
 
-def get_resnet18(num_classes=10, pretrained=False):
+def get_resnet18(num_classes=10, pretrained=False, in_channels=3):
     # if not pretrained:
     #     model = resnet18(weights=None)
     model = resnet18(pretrained=pretrained)
-    # 适配 32x32：小 kernel + 去掉第一个 maxpool
-    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    old_conv1 = model.conv1
+    model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    if pretrained:
+        with torch.no_grad():
+            old_weight = old_conv1.weight
+            center_weight = old_weight[:, :, 2:5, 2:5]
+            if in_channels == 1:
+                center_weight = center_weight.mean(dim=1, keepdim=True)
+            model.conv1.weight.copy_(center_weight)
     model.maxpool = nn.Identity()
-    # 改最后一层输出类别数
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
