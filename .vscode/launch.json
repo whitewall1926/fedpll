@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug FedPLL",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/yxf/miniconda3/envs/dl/bin/python",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--config",
+                "${workspaceFolder}/config.yaml"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "subProcess": true,
+            "env": {
+                "CUDA_LAUNCH_BLOCKING": "1",
+                "WANDB_MODE": "disabled"
+            }
+        }
+    ]
+}
